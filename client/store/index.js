@@ -4,6 +4,7 @@ import Vuex from 'vuex'
 import pathify from 'vuex-pathify' // eslint-disable-line import/no-duplicates
 import { make } from 'vuex-pathify' // eslint-disable-line import/no-duplicates
 
+import ai from './ai'
 import page from './page'
 import site from './site'
 import user from './user'
@@ -60,6 +61,7 @@ export default new Vuex.Store({
   },
   actions: { },
   modules: {
+    ai,
     page,
     site,
     user

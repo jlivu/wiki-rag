@@ -1,6 +1,7 @@
 <template lang="pug">
   v-app(v-scroll='upBtnScroll', :dark='$vuetify.theme.dark', :class='$vuetify.rtl ? `is-rtl` : `is-ltr`')
     nav-header(v-if='!printView')
+    chat-drawer(v-if='!printView')
     v-navigation-drawer(
       v-if='navMode !== `NONE` && !printView'
       :class='$vuetify.theme.dark ? `grey darken-4-d4` : `primary`'
@@ -360,6 +361,7 @@
 import { StatusIndicator } from 'vue-status-indicator'
 import Tabset from './tabset.vue'
 import NavSidebar from './nav-sidebar.vue'
+import ChatDrawer from '@/components/ai/chat-drawer.vue'
 import Prism from 'prismjs'
 import mermaid from 'mermaid'
 import { get, sync } from 'vuex-pathify'
@@ -408,6 +410,7 @@ Prism.plugins.toolbar.registerButton('copy-to-clipboard', (env) => {
 
 export default {
   components: {
+    ChatDrawer,
     NavSidebar,
     StatusIndicator
   },
