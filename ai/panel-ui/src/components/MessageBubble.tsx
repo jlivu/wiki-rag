@@ -1,3 +1,5 @@
+import type { Source } from '@shared'
+
 import type { ChatMessage } from '../types'
 import { messageText } from '../types'
 import { AnswerComponent } from './cards'
@@ -12,6 +14,9 @@ export function MessageBubble ({ message, locale }: {
   const bubbleClass = ['bub', message.status === 'error' ? 'bub-error' : null]
     .filter(Boolean)
     .join(' ')
+  // Inline markers resolve against this reply's own sources card, so a
+  // citation can only ever point at a page this run really returned.
+  const sources = citedSources(message)
 
   return (
     <article className={isUser ? 'msg msg-usr' : 'msg msg-bot'}>
@@ -22,7 +27,9 @@ export function MessageBubble ({ message, locale }: {
             // Parts in the order the model produced them.
             : message.parts.map((part, index) => (
                 part.type === 'text'
-                  ? (part.text.length > 0 ? <Markdown key={index} text={part.text} /> : null)
+                  ? (part.text.length > 0
+                      ? <Markdown key={index} text={part.text} sources={sources} locale={locale} />
+                      : null)
                   : <AnswerComponent key={index} component={part.component} locale={locale} />
               ))}
           {message.status === 'streaming' ? <TypingDots /> : null}
@@ -31,6 +38,15 @@ export function MessageBubble ({ message, locale }: {
       </div>
     </article>
   )
+}
+
+/** The reply's sources card, which the server builds from what it cited. */
+function citedSources (message: ChatMessage): Source[] {
+  return message.parts.flatMap(part => (
+    part.type === 'component' && part.component.name === 'sources'
+      ? part.component.args.items
+      : []
+  ))
 }
 
 function formatTime (at: number): string {

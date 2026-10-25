@@ -10,7 +10,7 @@ import type { FastifyBaseLogger } from 'fastify'
 import type { Pool } from 'pg'
 
 import type { Config } from '../config.js'
-import { ensureEmbeddingColumn, migrate, readMeta } from '../index-db/migrate.js'
+import { ANCHOR_MIGRATION, ensureEmbeddingColumn, migrate, readMeta } from '../index-db/migrate.js'
 import { getPool } from '../index-db/pool.js'
 import {
   claim, complete, enqueue, enqueueIfAbsent, fail, queueDepth,
@@ -79,9 +79,13 @@ export class Indexer {
       return
     }
 
+    let rebuildChunks = false
     try {
       const ran = await migrate(this.#db)
       if (ran.length > 0) { this.#log.info({ migrations: ran }, 'index schema migrated') }
+      // Existing chunks predate section anchors, so they have to be built
+      // again. The text is unchanged, so no embedding is recomputed.
+      rebuildChunks = ran.includes(ANCHOR_MIGRATION)
     } catch (err) {
       this.#reason = 'the index database is unreachable'
       this.#log.error({ err }, 'the index database could not be prepared')
@@ -91,7 +95,10 @@ export class Indexer {
     await this.#prepareEmbeddings()
 
     this.#workerTimer = setTimeout(() => { void this.#drain() }, IDLE_POLL_MS)
-    this.#startupTimer = setTimeout(() => { void this.reconcile('startup') }, RECONCILE_START_DELAY_MS)
+    this.#startupTimer = setTimeout(() => {
+      void (rebuildChunks ? this.reindexEverything() : this.reconcile('startup'))
+    }, RECONCILE_START_DELAY_MS)
+    if (rebuildChunks) { this.#log.info('re-indexing: chunks now carry section anchors') }
     const everyMs = Math.max(1, this.#config.index.reconcileMinutes) * 60_000
     this.#reconcileTimer = setInterval(() => { void this.reconcile('scheduled') }, everyMs)
   }

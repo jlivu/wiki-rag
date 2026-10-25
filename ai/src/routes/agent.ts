@@ -7,6 +7,7 @@ import { EventEncoder } from '@ag-ui/encoder'
 import type { FastifyPluginAsync } from 'fastify'
 
 import { runMockAgent } from '../agent/mock-agent.js'
+import { SourceRegistry } from '../agent/sources.js'
 import { runWikiAgent } from '../agent/wiki-agent.js'
 import type { Config } from '../config.js'
 import type { Indexer } from '../indexer/indexer.js'
@@ -105,6 +106,9 @@ export function agentRoutes (config: Config, indexer: Indexer): FastifyPluginAsy
             token,
             defaultLocale: page?.locale ?? 'en',
             retriever: indexer.retriever,
+            // One registry per run: it hands out the S1, S2 ids and turns
+            // them back into links from what the tools returned.
+            sources: new SourceRegistry(config.wikiPublicUrl),
             log: request.log
           },
           emit,

@@ -31,6 +31,10 @@ export interface Source extends PageLink {
   snippet: string
   /** ISO 8601, e.g. 2026-09-14T04:12:00.000Z. */
   updatedAt?: string
+  /** Heading path of the section the answer came from. */
+  section?: string
+  /** Wiki.js's anchor for that section, e.g. "#troubleshooting". */
+  anchor?: string
 }
 
 export interface SourcesArgs {
@@ -126,7 +130,9 @@ export const PANEL_TOOL_SCHEMAS: Record<PanelToolName, Record<string, unknown>> 
           properties: {
             ...PAGE_LINK_PROPERTIES,
             snippet: { type: 'string', description: 'A sentence or two from the page showing why it is relevant. Quote the page; do not invent it.' },
-            updatedAt: { type: 'string', description: 'When the page was last updated, ISO 8601, if known.' }
+            updatedAt: { type: 'string', description: 'When the page was last updated, ISO 8601, if known.' },
+            section: { type: 'string', description: 'Heading path of the section used, e.g. "Procedure › 5. Verify".' },
+            anchor: { type: 'string', description: 'Wiki.js anchor for that section, e.g. "#troubleshooting".' }
           },
           required: ['title', 'path', 'snippet'],
           additionalProperties: false
@@ -253,7 +259,9 @@ function readSource (value: unknown, path: string): Source {
   return {
     ...readPageLink(item, path),
     snippet: str(item.snippet, `${path}.snippet`),
-    ...optional('updatedAt', optStr(item.updatedAt, `${path}.updatedAt`))
+    ...optional('updatedAt', optStr(item.updatedAt, `${path}.updatedAt`)),
+    ...optional('section', optStr(item.section, `${path}.section`)),
+    ...optional('anchor', optStr(item.anchor, `${path}.anchor`))
   }
 }
 

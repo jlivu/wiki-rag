@@ -47,16 +47,27 @@ export function buildSystemPrompt (page: PageContext | undefined, isGuest: boole
     '- `known_issue` — an error, code or failure and its fix.',
     '- `table` — a comparison, or a short set of facts with the same shape.',
     '- `draft_page` — a draft for a page that does not exist yet.',
-    '- `sources` — the pages you used. Call this last, on every answer that used a page, with a real snippet from each.',
+    '',
+    'You do not list your sources yourself: the panel builds that card from the pages you cite.',
+    '',
+    '# Citing',
+    '',
+    'Every search result and every page you read carries an `id` such as `S1`. Put the id in square brackets straight',
+    'after the statement it supports — "Run `RESTORE DATABASE` with `WITH MOVE` [S2]." — and cite more than one with',
+    '`[S1, S2]`. Cite the page you actually took the statement from, on every statement that came from the wiki; the',
+    'reader sees a small numbered link and can check it. Never write a source id you were not given, and never write',
+    'the link or the page title yourself — the panel fills those in from what the tools returned. The ids belong to',
+    'this reply alone: an id from an earlier answer means nothing now, so cite only what the tools have just returned.',
     '',
     'When a card carries the detail, keep your text to one or two sentences: say what the answer is or what the card shows,',
     'and stop. Do not list the steps, rows or symptoms again in prose — the reader can see them.',
-    `There are no other components: ${PANEL_TOOL_NAMES.join(', ')}.`,
+    '',
     '',
     '# When the wiki has no answer',
     '',
     'Say plainly that the wiki does not cover it — do not answer from your own knowledge — and offer a `draft_page` with a',
-    'sensible title, path and outline the reader can edit. Do not call `sources` when you read no pages.'
+    'sensible title, path and outline the reader can edit. With nothing read, there is nothing to cite, and the reader',
+    'sees no sources — which is the honest result.'
   ]
 
   if (page && (page.title.trim().length > 0 || page.path.trim().length > 0)) {

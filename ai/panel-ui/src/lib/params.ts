@@ -32,3 +32,13 @@ export function wikiHref (path: string, locale: string | undefined, fallbackLoca
   const trimmed = path.replace(/^\/+/, '')
   return `/${locale || fallbackLocale}/${trimmed}`
 }
+
+/** The address of a source, including the section the answer came from. */
+export function sourceHref (
+  source: { path: string, locale?: string, anchor?: string },
+  fallbackLocale: string
+): string {
+  const raw = source.anchor?.trim() ?? ''
+  const anchor = raw.length === 0 ? '' : (raw.startsWith('#') ? raw : `#${raw}`)
+  return `${wikiHref(source.path, source.locale, fallbackLocale)}${anchor}`
+}

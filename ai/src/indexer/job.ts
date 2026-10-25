@@ -10,6 +10,7 @@ import type { WikiAdminClient, WikiPageSource } from '../wiki/admin-client.js'
 
 import { chunkMarkdown, estimateTokens, hash } from './chunker.js'
 import { toVectorLiteral, type Embedder } from './embeddings.js'
+import { tocFromRender } from './toc.js'
 
 export interface JobOutcome {
   action: 'indexed' | 'skipped' | 'removed'
@@ -49,7 +50,9 @@ export async function runJob (
     return { action: 'skipped', reason: 'unchanged' }
   }
 
-  const chunks = chunkMarkdown(markdown, page.title ?? page.path)
+  // Section anchors come from the rendered page's own heading ids, which
+  // are what Wiki.js builds its table of contents from.
+  const chunks = chunkMarkdown(markdown, page.title ?? page.path, tocFromRender(page.render))
 
   // A chunk whose text is unchanged keeps the vector it already has; a
   // rename or an edit elsewhere on the page costs nothing to embed.

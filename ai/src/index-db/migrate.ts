@@ -96,8 +96,15 @@ const MIGRATIONS: Migration[] = [
       );
       CREATE INDEX IF NOT EXISTS index_queue_due ON index_queue (run_after)
     `
+  },
+  {
+    name: '008-chunk-anchor',
+    sql: `ALTER TABLE index_chunks ADD COLUMN IF NOT EXISTS anchor text NOT NULL DEFAULT ''`
   }
 ]
+
+/** Applying this one means the chunks have to be built again. */
+export const ANCHOR_MIGRATION = '008-chunk-anchor'
 
 export async function migrate (db: Pool): Promise<string[]> {
   await db.query(`

@@ -152,14 +152,18 @@ the model has to reply with what it has.
 
 Two tools read the wiki (`src/wiki/tools.ts`):
 
-- `search_wiki(query, locale?, limit?)` — Wiki.js's own `pages.search`,
-  returning titles, paths and descriptions.
+- `search_wiki(query, locale?, limit?)` — the hybrid index search, returning
+  titles, paths, the matching section and its link.
 - `get_page(path, locale?)` — one page as Markdown.
 
-Five more tools draw the answer: `sources`, `checklist`, `known_issue`,
-`table`, `draft_page`. They are the same five components as before, described
-to the model from `shared/components.ts`, so a tool call that satisfies the
-schema also passes `parsePanelComponent`.
+Every result from either carries a short source id — `S1`, `S2` — for the
+model to cite. See *Citing sources* below.
+
+Four more tools draw the answer: `checklist`, `known_issue`, `table`,
+`draft_page`, described to the model from `shared/components.ts`, so a tool
+call that satisfies the schema also passes `parsePanelComponent`. The fifth
+component, `sources`, is not offered to the model: the server builds that
+card itself.
 
 The system prompt (`src/agent/system-prompt.ts`) holds the agent to the wiki:
 answer only from pages read in this run, never invent a command or a setting,
@@ -168,6 +172,32 @@ and when the wiki has no answer say so and offer a draft page.
 With Anthropic, the system prompt, the tool definitions and the conversation
 so far are cached: one breakpoint on the system block (tools render before
 it, so both are covered) and automatic placement on the last message block.
+
+### Citing sources
+
+Links and titles never come from the model. `src/agent/sources.ts` keeps a
+registry for the run: every page a tool returns is recorded once — one entry
+per page, filled in further each time it comes back — with its title, the
+section that matched, a snippet, the last-updated date and the URL to open,
+section anchor included.
+
+The model is given only the ids. It writes `[S1]`, or `[S1, S2]`, after the
+statement each source supports. As the answer streams, the same registry
+rewrites those markers into `[1](cite:1)` — a marker split across two deltas
+is held back until it is whole, and a marker naming something this run did
+not return is dropped rather than shown. The numbers are citation order,
+first cited first.
+
+The run then ends with a `sources` card the server builds from exactly those
+sources, in that order. If the model cited nothing but did read pages, the
+pages it read are listed instead, so an answer drawn from the wiki never
+ends without its sources. An answer that found nothing relevant — nothing
+cited, nothing read — shows no card at all.
+
+In the panel, `cite:1` is resolved against that card: entry 1 is marker [1].
+The link, the title and the section come from the card, never from the href,
+and a marker with no entry behind it (the card has not arrived yet) stays a
+plain number. See `panel-ui/src/components/Citation.tsx`.
 A run asks the model several times with a growing prefix, and a follow-up
 question reuses the same prefix again, so most of the input is a cache read.
 `LLM_PROMPT_CACHE=0` turns it off.
@@ -207,9 +237,9 @@ schema is created by migrations that run at startup
 
 - `index_pages` — one row per page: path, locale, title, content type, a hash
   of the source and Wiki.js's `updatedAt`.
-- `index_chunks` — the page id, the heading path, the chunk text, a content
-  hash, the embedding, the model that produced it, and `fts`, a generated
-  `tsvector`. An **HNSW** index covers the vectors and a **GIN** index covers
+- `index_chunks` — the page id, the heading path, Wiki.js's anchor for that
+  heading, the chunk text, a content hash, the embedding, the model that
+  produced it, and `fts`, a generated `tsvector`. An **HNSW** index covers the vectors and a **GIN** index covers
   `fts`.
 - `index_queue` — one row per page waiting to be indexed.
 - `index_meta` — the embedding model and its width.
@@ -233,7 +263,18 @@ A job fetches the page through Wiki.js GraphQL with `WIKI_API_KEY`, converts
 it to Markdown if it was not written in Markdown, splits it at its headings
 into chunks of roughly 300–600 tokens — each prefixed with the page title and
 the headings above it — embeds only the chunks whose hash changed, and
-replaces the page's chunks in one transaction. An unpublished page is removed
+replaces the page's chunks in one transaction.
+
+A chunk belongs to one section: a long section is cut into several chunks and
+short pieces are merged back together, but nothing is ever merged across a
+heading, because a chunk that ran on past its heading would send a reader to
+a section its text had already left. Each chunk keeps Wiki.js's own anchor
+for its heading (`#troubleshooting`,
+`#h-1-copy-the-backup-into-the-container`), read from the rendered page's
+heading ids — the very elements Wiki.js walks to build a page's table of
+contents, so the rules for turning a heading into a slug are not repeated
+here. (Wiki.js's `toc` field itself cannot be fetched over GraphQL: it is
+declared `String` and resolved to an array, so selecting it fails.) An unpublished page is removed
 from the index, a deleted page is removed, and a rename updates the path
 without re-embedding anything, because the text did not change.
 
@@ -270,8 +311,11 @@ distance (HNSW) and full text (`websearch_to_tsquery` ranked by
 with reciprocal rank fusion, `score = Σ 1 / (60 + rank)`, which needs no
 calibration between a distance and a text rank. Chunks are then grouped back
 into pages, each page keeping its best one or two chunks as its snippet, and
-the top pages come back with title, path, heading, snippet, last-updated date
-and score.
+the top pages come back with title, path, the heading and anchor of the
+best-matching chunk, a snippet, the last-updated date and the score. The
+snippet is tidied for reading — fenced code dropped, table rows flattened to
+one line — unless that would leave nothing, in which case the text stands as
+it is.
 
 Wiki.js's own search is the fallback, used only when there is no index to
 ask — the database is unreachable, or nothing has been indexed yet. It is
@@ -313,7 +357,8 @@ proxy, so an agent on this Mac connects to
 `http://127.0.0.1:3080/ai/mcp`.
 
 Four tools, described for an agent rather than a person. Each result carries
-the page's URL, so an agent can cite what it used.
+the page's URL — a search hit links straight to the section that matched — so
+an agent can cite what it used.
 
 | Tool | What it does |
 | ---- | ------------ |
@@ -476,7 +521,7 @@ panel joins them rather than letting the last one replace the rest. The wiki
 tools are not in this stream: they run on the server and only their results
 reach the model.
 
-A tool call is how an answer asks for a card. The name has to be one of
+A tool call is how a card reaches the panel. The name has to be one of
 `sources`, `checklist`, `known_issue`, `table` or `draft_page`, and the
 arguments have to pass `parsePanelComponent` in `shared/components.ts`;
 anything else is ignored rather than drawn. `shared/` has no dependencies on

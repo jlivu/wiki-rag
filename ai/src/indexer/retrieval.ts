@@ -27,7 +27,10 @@ export interface RetrievedPage {
   title: string
   path: string
   locale: string
+  /** The heading path of the best chunk, e.g. "Procedure › 5. Verify". */
   heading: string
+  /** Wiki.js's anchor for that section, e.g. "#troubleshooting". */
+  anchor: string
   snippet: string
   updatedAt: string
   score: number
@@ -132,6 +135,7 @@ function groupByPage (hits: ChunkHit[]): RetrievedPage[] {
         path: first.path,
         locale: first.locale,
         heading: first.headingPath,
+        anchor: first.anchor,
         snippet: best.map(hit => snippetOf(hit)).join('\n\n…\n\n'),
         updatedAt: first.updatedAt,
         score: Number(entry.score.toFixed(6))
@@ -140,12 +144,47 @@ function groupByPage (hits: ChunkHit[]): RetrievedPage[] {
     .sort((a, b) => b.score - a.score)
 }
 
-/** Chunk text carries a "Title › Heading" prefix; the snippet is the body. */
+/**
+ * Chunk text carries a "Title › Heading" prefix; the snippet is the body.
+ *
+ * A snippet is read at a glance in a card, so the markup that reads worst
+ * there is taken out: fenced code is dropped and table rows are flattened
+ * to one line. A chunk that is nothing but code keeps its code, because
+ * showing something beats showing nothing.
+ */
 function snippetOf (hit: ChunkHit): string {
   const body = hit.text.includes('\n\n') ? hit.text.slice(hit.text.indexOf('\n\n') + 2) : hit.text
-  const clean = body.trim()
-  if (clean.length <= SNIPPET_CHARS) { return clean }
-  const cut = clean.slice(0, SNIPPET_CHARS)
+  return clip(readable(body) || body.trim())
+}
+
+function readable (body: string): string {
+  const kept: string[] = []
+  let fence: string | null = null
+
+  for (const line of body.split('\n')) {
+    const fenceMatch = /^\s{0,3}(`{3,}|~{3,})/.exec(line)
+    if (fenceMatch?.[1]) {
+      fence = fence === null ? fenceMatch[1][0] ?? '`' : null
+      continue
+    }
+    if (fence !== null) { continue }
+
+    const clean = line.trim().replace(/^>\s?/, '')
+    // The row of dashes under a table's header says nothing on its own.
+    if (clean.length === 0 || /^\|?[\s:|-]+\|?$/.test(clean)) { continue }
+    kept.push(
+      clean.startsWith('|')
+        ? clean.replace(/^\||\|$/g, '').split('|').map(cell => cell.trim()).filter(Boolean).join(' · ')
+        : clean
+    )
+  }
+
+  return kept.join(' ').trim()
+}
+
+function clip (text: string): string {
+  if (text.length <= SNIPPET_CHARS) { return text }
+  const cut = text.slice(0, SNIPPET_CHARS)
   const lastSpace = cut.lastIndexOf(' ')
   return `${cut.slice(0, lastSpace > SNIPPET_CHARS * 0.6 ? lastSpace : SNIPPET_CHARS).trimEnd()}…`
 }

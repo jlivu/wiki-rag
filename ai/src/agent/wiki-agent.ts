@@ -27,6 +27,7 @@ import {
 import type { ChatMessage, ChatProvider, ProviderToolCall, ToolSpec } from '../providers/types.js'
 import { isWikiTool, runWikiTool, wikiToolSpecs, type ToolContext } from '../wiki/tools.js'
 
+import { CitationRewriter } from './sources.js'
 import { buildSystemPrompt } from './system-prompt.js'
 
 export interface AgentLogger {
@@ -79,6 +80,7 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
   const allTools = [...wikiToolSpecs(locale), ...panelTools]
 
   const pendingToolCallIds: string[] = []
+  const rewriter = new CitationRewriter(toolContext.sources)
   let openTextId: string | null = null
   let lastTextId: string | null = null
 
@@ -89,7 +91,14 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
     }
     return openTextId
   }
+  const say = (chunk: string) => {
+    if (chunk.length === 0) { return }
+    const messageId = openText()
+    emit({ type: EventType.TEXT_MESSAGE_CONTENT, messageId, delta: chunk })
+  }
+  /** Flush whatever the rewriter is holding, then end the message. */
   const closeText = () => {
+    say(rewriter.flush())
     if (openTextId !== null) {
       emit({ type: EventType.TEXT_MESSAGE_END, messageId: openTextId })
       lastTextId = openTextId
@@ -124,9 +133,10 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
       switch (event.type) {
         case 'text':
           if (event.delta.length > 0) {
-            const messageId = openText()
+            // History keeps what the model wrote; the reader gets the
+            // version with [S1] turned into a numbered link.
             text += event.delta
-            emit({ type: EventType.TEXT_MESSAGE_CONTENT, messageId, delta: event.delta })
+            say(rewriter.push(event.delta))
           }
           break
         case 'tool_call': {
@@ -163,12 +173,7 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
     if (stopReason === 'length') {
       // The reply ran into MAX_OUTPUT_TOKENS, so it stops mid-sentence.
       // Say so rather than leaving the reader with half an answer.
-      const messageId = openText()
-      emit({
-        type: EventType.TEXT_MESSAGE_CONTENT,
-        messageId,
-        delta: '\n\n*(This answer was cut short — it reached the reply length limit. Ask for a smaller part of it, or raise MAX_OUTPUT_TOKENS.)*'
-      })
+      say('\n\n*(This answer was cut short — it reached the reply length limit. Ask for a smaller part of it, or raise MAX_OUTPUT_TOKENS.)*')
       closeText()
       break
     }
@@ -202,6 +207,38 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
     }
   }
 
+  // An answer drawn from the wiki never ends without its sources. The
+  // model cannot forget to list them, and cannot list anything it did not
+  // actually get back from a tool.
+  const citedSources = toolContext.sources.cited
+  const shown = citedSources.length > 0 ? citedSources : toolContext.sources.read
+  if (shown.length > 0) {
+    const card: ProviderToolCall = {
+      id: randomUUID(),
+      name: 'sources',
+      args: {
+        items: shown.map(source => ({
+          title: source.title,
+          path: source.path,
+          locale: source.locale,
+          snippet: source.snippet,
+          ...(source.updatedAt ? { updatedAt: source.updatedAt } : {}),
+          ...(source.section ? { section: source.section } : {}),
+          ...(source.anchor ? { anchor: source.anchor } : {})
+        }))
+      }
+    }
+    const parsed = parsePanelComponent(card.name, card.args)
+    if (parsed.ok) {
+      emitComponent(emit, card, lastTextId)
+      pendingToolCallIds.push(card.id)
+      stats.toolCalls.push({ name: 'sources', ok: true, cited: citedSources.length, listed: shown.length })
+    } else {
+      // Only reachable if a tool returned a page with no usable snippet.
+      opts.tools.log.warn({ reason: parsed.error }, 'the sources card could not be built')
+    }
+  }
+
   emit({
     type: EventType.RUN_FINISHED,
     threadId: input.threadId,
@@ -231,8 +268,13 @@ function toolResult (call: ProviderToolCall, content: string): ChatMessage {
   return { role: 'tool', toolCallId: call.id, toolName: call.name, content }
 }
 
+/**
+ * The cards the model may draw. `sources` is not among them: the server
+ * builds that card from what was actually cited, so its titles, links and
+ * snippets come from the tool results rather than from the model.
+ */
 function panelToolSpecs (): ToolSpec[] {
-  return PANEL_TOOL_NAMES.map(name => {
+  return PANEL_TOOL_NAMES.filter(name => name !== 'sources').map(name => {
     const schema = PANEL_TOOL_SCHEMAS[name]
     return {
       name,

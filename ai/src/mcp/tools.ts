@@ -39,8 +39,8 @@ export interface ToolResult {
   isError?: boolean
 }
 
-export function pageUrl (publicUrl: string, locale: string, path: string): string {
-  return `${publicUrl}/${locale}/${path.replace(/^\/+/, '')}`
+export function pageUrl (publicUrl: string, locale: string, path: string, anchor = ''): string {
+  return `${publicUrl}/${locale}/${path.replace(/^\/+/, '')}${anchor}`
 }
 
 /* ── search_wiki ───────────────────────────────────────────────────── */
@@ -63,7 +63,8 @@ export async function searchWiki (
       title: page.title,
       path: page.path,
       locale: page.locale,
-      url: pageUrl(ctx.publicUrl, page.locale, page.path),
+      // Straight to the section that matched.
+      url: pageUrl(ctx.publicUrl, page.locale, page.path, page.anchor),
       heading: page.heading,
       snippet: page.snippet,
       updatedAt: page.updatedAt,

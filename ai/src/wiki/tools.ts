@@ -4,6 +4,7 @@
  */
 import type { FastifyBaseLogger } from 'fastify'
 
+import type { SourceRegistry } from '../agent/sources.js'
 import type { Retriever } from '../indexer/retrieval.js'
 import type { ToolSpec } from '../providers/types.js'
 
@@ -25,8 +26,9 @@ export function wikiToolSpecs (defaultLocale: string): ToolSpec[] {
         'Search this wiki and get back the pages that match, each with a short snippet of the part that matched.',
         'Call it before answering anything about the wiki\'s content. It searches the words on the page as well as its',
         'title, so a plain question works as well as keywords; search again with different wording if the first attempt',
-        'finds nothing. It returns only pages the reader is allowed to see. The snippets are an extract, not the page —',
-        'read a page with get_page before you answer from it.'
+        'finds nothing. It returns only pages the reader is allowed to see. Each result carries an "id" such as S1:',
+        'that is what you cite. The snippets are an extract, not the page — read a page with get_page before you answer',
+        'from it.'
       ].join(' '),
       inputSchema: {
         type: 'object',
@@ -44,7 +46,7 @@ export function wikiToolSpecs (defaultLocale: string): ToolSpec[] {
       description: [
         'Read one wiki page as Markdown, by the path search_wiki returned.',
         'Use it for every page you intend to quote, cite or summarise; search results alone are not enough to answer from.',
-        'Fails if the reader is not allowed to see the page.'
+        'The result carries an "id" such as S1, which is what you cite. Fails if the reader is not allowed to see the page.'
       ].join(' '),
       inputSchema: {
         type: 'object',
@@ -78,6 +80,8 @@ export interface ToolContext {
   defaultLocale: string
   /** Null when there is no index to search. */
   retriever: Retriever | null
+  /** Collects what the tools returned, so citations resolve on the server. */
+  sources: SourceRegistry
   log: FastifyBaseLogger
 }
 
@@ -89,7 +93,7 @@ export async function runWikiTool (
   const input = (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown>
   try {
     if (name === SEARCH_WIKI) { return await search(ctx, input) }
-    if (name === GET_PAGE) { return await getPage(ctx.client, ctx.defaultLocale, input) }
+    if (name === GET_PAGE) { return await getPage(ctx, input) }
     return fail(`There is no tool called "${name}".`)
   } catch (err) {
     if (err instanceof WikiError) {
@@ -137,11 +141,32 @@ async function search (ctx: ToolContext, input: Record<string, unknown>): Promis
     try {
       if (await ctx.retriever.hasContent()) {
         const found = await ctx.retriever.search(query, locale, limit, ctx.client, ctx.token)
+        const results = found.results.map(page => {
+          const source = ctx.sources.register({
+            title: page.title,
+            path: page.path,
+            locale: page.locale,
+            anchor: page.anchor,
+            section: page.heading,
+            snippet: page.snippet,
+            updatedAt: page.updatedAt
+          })
+          return {
+            id: source.id,
+            title: page.title,
+            path: page.path,
+            section: page.heading,
+            url: source.url,
+            snippet: page.snippet,
+            updatedAt: page.updatedAt,
+            score: page.score
+          }
+        })
         return {
           result: JSON.stringify({
             query,
-            results: found.results,
-            ...(found.results.length === 0
+            results,
+            ...(results.length === 0
               ? { note: 'Nothing matched. Try different wording, or tell the reader the wiki does not cover this.' }
               : {})
           }),
@@ -173,12 +198,21 @@ async function searchViaWiki (
 ): Promise<ToolOutcome> {
   const data = await ctx.client.graphql<SearchResponse>(SEARCH_QUERY, { query, locale })
   const found = data.pages.search
-  const results = found.results.slice(0, limit).map(page => ({
-    title: page.title,
-    path: page.path,
-    locale: page.locale,
-    description: page.description
-  }))
+  const results = found.results.slice(0, limit).map(page => {
+    const source = ctx.sources.register({
+      title: page.title,
+      path: page.path,
+      locale: page.locale,
+      snippet: page.description
+    })
+    return {
+      id: source.id,
+      title: page.title,
+      path: page.path,
+      url: source.url,
+      description: page.description
+    }
+  })
 
   return {
     result: JSON.stringify({
@@ -194,26 +228,33 @@ async function searchViaWiki (
   }
 }
 
-async function getPage (
-  client: WikiClient,
-  defaultLocale: string,
-  input: Record<string, unknown>
-): Promise<ToolOutcome> {
+async function getPage (ctx: ToolContext, input: Record<string, unknown>): Promise<ToolOutcome> {
+  const client = ctx.client
   const rawPath = asString(input.path)
   if (!rawPath) { return fail('get_page needs a "path".') }
 
-  const locale = asString(input.locale) ?? defaultLocale
+  const locale = asString(input.locale) ?? ctx.defaultLocale
   // Tolerate a path that still carries its locale, e.g. "/en/ops/backup".
   const path = rawPath.replace(/^\/+/, '').replace(new RegExp(`^${locale}/`), '')
 
   const page = await client.fetchPage(path, locale)
   const markdown = trimForContext(htmlToMarkdown(page.html), MAX_PAGE_CHARS)
+  const source = ctx.sources.register({
+    title: page.title,
+    path: page.path,
+    locale: page.locale,
+    updatedAt: page.updatedAt,
+    snippet: page.description,
+    read: true
+  })
 
   return {
     result: JSON.stringify({
+      id: source.id,
       title: page.title,
       path: page.path,
       locale: page.locale,
+      url: source.url,
       updatedAt: page.updatedAt,
       description: page.description,
       content: markdown.text

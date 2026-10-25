@@ -206,6 +206,47 @@ pre,
 
 .md a:hover { text-decoration: underline; }
 
+/*
+ * An inline citation: a small numbered link to the section it came from.
+ * Raised slightly, like a footnote mark, without disturbing line height.
+ */
+.cite {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  margin: 0 1px;
+  position: relative;
+  top: -1px;
+  border-radius: 4px;
+  background-color: var(--primary-soft);
+  color: var(--primary);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  vertical-align: baseline;
+}
+
+.md a.cite:hover {
+  background-color: var(--primary);
+  color: #fff;
+  text-decoration: none;
+}
+
+.cite:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+/* A marker whose source has not arrived yet: a number, not a link. */
+.cite-plain {
+  background-color: var(--border);
+  color: var(--text-3);
+}
+
 .md code {
   padding: 1px 5px;
   border-radius: 4px;
@@ -334,11 +375,30 @@ pre,
 }
 
 .src {
-  display: block;
+  display: flex;
+  gap: 9px;
   padding: 10px 12px;
   color: inherit;
   text-decoration: none;
 }
+
+/* The number that the inline markers in the answer point at. */
+.src-no {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background-color: var(--primary-soft);
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.src-body { min-width: 0; }
 
 .src:hover { background-color: var(--primary-soft); }
 
@@ -352,6 +412,13 @@ pre,
   font-size: 13px;
   font-weight: 500;
   color: var(--primary);
+}
+
+.src-section {
+  display: block;
+  margin-top: 1px;
+  font-size: 11.5px;
+  color: var(--text-2);
 }
 
 .src-path {

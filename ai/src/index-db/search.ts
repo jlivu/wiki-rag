@@ -17,6 +17,8 @@ export interface ChunkHit {
   pageId: number
   ordinal: number
   headingPath: string
+  /** Wiki.js's anchor for the section, e.g. "#troubleshooting". */
+  anchor: string
   text: string
   score: number
   vectorRank: number | null
@@ -70,7 +72,7 @@ const HYBRID_SQL = `
     GROUP BY chunk_id
   )
   SELECT
-    c.id, c.page_id, c.ordinal, c.heading_path, c.text,
+    c.id, c.page_id, c.ordinal, c.heading_path, c.anchor, c.text,
     f.score::float8 AS score, f.vector_rank, f.text_rank,
     p.title, p.path, p.locale, p.updated_at
   FROM fused f
@@ -87,7 +89,7 @@ export async function searchChunks (
   perList: number
 ): Promise<ChunkHit[]> {
   const { rows } = await db.query<{
-    id: number, page_id: number, ordinal: number, heading_path: string, text: string,
+    id: number, page_id: number, ordinal: number, heading_path: string, anchor: string, text: string,
     score: number, vector_rank: number | null, text_rank: number | null,
     title: string, path: string, locale: string, updated_at: Date
   }>(HYBRID_SQL, [queryEmbedding, locale, query, perList, RRF_K])
@@ -97,6 +99,7 @@ export async function searchChunks (
     pageId: row.page_id,
     ordinal: row.ordinal,
     headingPath: row.heading_path,
+    anchor: row.anchor,
     text: row.text,
     score: row.score,
     vectorRank: row.vector_rank,

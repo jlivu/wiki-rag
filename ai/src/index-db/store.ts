@@ -19,6 +19,7 @@ export interface IndexedPage {
 export interface ChunkInput {
   ordinal: number
   headingPath: string
+  anchor: string
   text: string
   contentHash: string
   tokens: number
@@ -77,9 +78,9 @@ export async function replacePage (
 
     for (const chunk of chunks) {
       await client.query(`
-        INSERT INTO index_chunks (page_id, ordinal, heading_path, text, content_hash, embed_model, tokens, embedding)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector)
-      `, [page.id, chunk.ordinal, chunk.headingPath, chunk.text, chunk.contentHash, embedModel, chunk.tokens, chunk.embeddingLiteral])
+        INSERT INTO index_chunks (page_id, ordinal, heading_path, anchor, text, content_hash, embed_model, tokens, embedding)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector)
+      `, [page.id, chunk.ordinal, chunk.headingPath, chunk.anchor, chunk.text, chunk.contentHash, embedModel, chunk.tokens, chunk.embeddingLiteral])
     }
   })
 }
