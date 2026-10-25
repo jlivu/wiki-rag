@@ -27,6 +27,8 @@ export interface ChunkHit {
   anchor: string
   /** Where in a document: "Page 4", "Sheet \"Budget\" rows 12–40". */
   location: string
+  /** For an image: 'ocr', 'alt' or 'description'. Empty otherwise. */
+  origin: string
   text: string
   score: number
   vectorRank: number | null
@@ -112,7 +114,7 @@ const HYBRID_SQL = `
     GROUP BY chunk_id
   )
   SELECT
-    c.id, c.ordinal, c.heading_path, c.anchor, c.location, c.text,
+    c.id, c.ordinal, c.heading_path, c.anchor, c.location, c.origin, c.text,
     f.score::float8 AS score, f.vector_rank, f.text_rank,
     o.kind, o.owner_id, o.title, o.path, o.locale, o.updated_at,
     o.file_name, o.doc_type, o.mime, o.file_size
@@ -131,7 +133,7 @@ export async function searchChunks (
 ): Promise<ChunkHit[]> {
   const { rows } = await db.query<{
     id: number, kind: 'page' | 'document', owner_id: number, ordinal: number,
-    heading_path: string, anchor: string, location: string, text: string,
+    heading_path: string, anchor: string, location: string, origin: string, text: string,
     score: number, vector_rank: number | null, text_rank: number | null,
     title: string, path: string, locale: string, updated_at: Date,
     file_name: string, doc_type: string, mime: string, file_size: string
@@ -145,6 +147,7 @@ export async function searchChunks (
     headingPath: row.heading_path,
     anchor: row.anchor,
     location: row.location,
+    origin: row.origin,
     text: row.text,
     score: row.score,
     vectorRank: row.vector_rank,
@@ -164,9 +167,11 @@ export async function searchChunks (
 export async function documentChunks (
   db: Pool,
   documentId: number
-): Promise<Array<{ ordinal: number, location: string, anchor: string, text: string }>> {
-  const { rows } = await db.query<{ ordinal: number, location: string, anchor: string, text: string }>(
-    'SELECT ordinal, location, anchor, text FROM index_chunks WHERE document_id = $1 ORDER BY ordinal',
+): Promise<Array<{ ordinal: number, location: string, anchor: string, origin: string, text: string }>> {
+  const { rows } = await db.query<{
+    ordinal: number, location: string, anchor: string, origin: string, text: string
+  }>(
+    'SELECT ordinal, location, anchor, origin, text FROM index_chunks WHERE document_id = $1 ORDER BY ordinal',
     [documentId]
   )
   return rows

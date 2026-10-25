@@ -23,6 +23,8 @@ export interface ChunkInput {
   anchor: string
   /** Where in a document this came from: "Page 4", "Slide 7". Pages use ''. */
   location?: string
+  /** For an image: 'ocr', 'alt' or 'description'. Empty for text. */
+  origin?: string
   text: string
   contentHash: string
   tokens: number
@@ -123,11 +125,12 @@ async function insertChunks (
   for (const chunk of chunks) {
     await client.query(`
       INSERT INTO index_chunks
-        (page_id, document_id, ordinal, heading_path, anchor, location, text, content_hash, embed_model, tokens, embedding)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::vector)
+        (page_id, document_id, ordinal, heading_path, anchor, location, origin,
+         text, content_hash, embed_model, tokens, embedding)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::vector)
     `, [
       pageId, documentId, chunk.ordinal, chunk.headingPath, chunk.anchor, chunk.location ?? '',
-      chunk.text, chunk.contentHash, embedModel, chunk.tokens, chunk.embeddingLiteral
+      chunk.origin ?? '', chunk.text, chunk.contentHash, embedModel, chunk.tokens, chunk.embeddingLiteral
     ])
   }
 }
@@ -339,5 +342,140 @@ function toDocument (row: DocumentRow): IndexedDocument {
     sourceHash: row.source_hash,
     status: row.status,
     reason: row.reason
+  }
+}
+
+/* ── what a page says about an image ───────────────────────────────── */
+
+export interface PageImageText {
+  assetPath: string
+  alt: string
+  caption: string
+}
+
+/** Replace the alt text and captions one page gives the images it shows. */
+export async function replaceImageText (
+  db: Pool,
+  pageId: number,
+  images: PageImageText[]
+): Promise<void> {
+  await withTransaction(db, async client => {
+    await client.query('DELETE FROM index_image_text WHERE page_id = $1', [pageId])
+    // A page can show the same image twice; the two entries are merged
+    // rather than fighting over the primary key.
+    const merged = new Map<string, PageImageText>()
+    for (const image of images) {
+      const existing = merged.get(image.assetPath)
+      if (!existing) {
+        merged.set(image.assetPath, { ...image })
+        continue
+      }
+      if (existing.alt.length === 0) { existing.alt = image.alt }
+      if (image.caption.length > 0 && !existing.caption.includes(image.caption)) {
+        existing.caption = [existing.caption, image.caption].filter(Boolean).join(' ')
+      }
+    }
+    for (const image of merged.values()) {
+      if (image.alt.length === 0 && image.caption.length === 0) { continue }
+      await client.query(
+        'INSERT INTO index_image_text (asset_path, page_id, alt, caption) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING',
+        [image.assetPath, pageId, image.alt, image.caption]
+      )
+    }
+  })
+}
+
+/** Everything the wiki's pages call one image. */
+export async function imageTextFor (
+  db: Pool,
+  assetPath: string
+): Promise<Array<{ pageId: number, title: string, alt: string, caption: string }>> {
+  const { rows } = await db.query<{ page_id: number, title: string, alt: string, caption: string }>(`
+    SELECT t.page_id, p.title, t.alt, t.caption
+    FROM index_image_text t
+    JOIN index_pages p ON p.id = t.page_id
+    WHERE t.asset_path = $1
+    ORDER BY p.title
+  `, [assetPath])
+  return rows.map(row => ({ pageId: row.page_id, title: row.title, alt: row.alt, caption: row.caption }))
+}
+
+/** The asset paths a page mentions, to notice when its alt text changed. */
+export async function imagePathsOnPage (db: Pool, pageId: number): Promise<string[]> {
+  const { rows } = await db.query<{ asset_path: string }>(
+    'SELECT asset_path FROM index_image_text WHERE page_id = $1', [pageId]
+  )
+  return rows.map(row => row.asset_path)
+}
+
+/** The indexed images at these paths, so a changed caption can re-index them. */
+export async function documentIdsByPath (db: Pool, paths: string[]): Promise<number[]> {
+  if (paths.length === 0) { return [] }
+  const { rows } = await db.query<{ id: number }>(
+    'SELECT id FROM index_documents WHERE path = ANY($1::text[])', [paths]
+  )
+  return rows.map(row => row.id)
+}
+
+/* ── generated descriptions ────────────────────────────────────────── */
+
+export interface StoredDescription {
+  text: string
+  model: string
+  inputTokens: number
+  outputTokens: number
+}
+
+/** A description is kept against the image's bytes, not its path, so the
+ *  same picture is never described twice however often it is uploaded. */
+export async function readDescription (db: Pool, contentHash: string): Promise<StoredDescription | null> {
+  const { rows } = await db.query<{
+    text: string, model: string, input_tokens: number, output_tokens: number
+  }>(
+    'SELECT text, model, input_tokens, output_tokens FROM index_image_descriptions WHERE content_hash = $1',
+    [contentHash]
+  )
+  const row = rows[0]
+  return row
+    ? { text: row.text, model: row.model, inputTokens: row.input_tokens, outputTokens: row.output_tokens }
+    : null
+}
+
+export async function saveDescription (
+  db: Pool,
+  contentHash: string,
+  description: StoredDescription
+): Promise<void> {
+  await db.query(`
+    INSERT INTO index_image_descriptions (content_hash, model, text, input_tokens, output_tokens)
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT (content_hash) DO UPDATE SET
+      model = EXCLUDED.model, text = EXCLUDED.text,
+      input_tokens = EXCLUDED.input_tokens, output_tokens = EXCLUDED.output_tokens
+  `, [contentHash, description.model, description.text, description.inputTokens, description.outputTokens])
+}
+
+/** How many images have been described since midnight, for the daily cap. */
+export async function describedToday (db: Pool): Promise<number> {
+  const { rows } = await db.query<{ count: string }>(
+    "SELECT count(*)::text AS count FROM index_image_descriptions WHERE created_at >= date_trunc('day', now())"
+  )
+  return Number(rows[0]?.count ?? 0)
+}
+
+/** Tokens spent on descriptions today, for the log line. */
+export async function describeSpendToday (db: Pool): Promise<{ images: number, inputTokens: number, outputTokens: number }> {
+  const { rows } = await db.query<{ images: string, input: string, output: string }>(`
+    SELECT count(*)::text AS images,
+           coalesce(sum(input_tokens), 0)::text AS input,
+           coalesce(sum(output_tokens), 0)::text AS output
+    FROM index_image_descriptions
+    WHERE created_at >= date_trunc('day', now())
+  `)
+  const row = rows[0]
+  return {
+    images: Number(row?.images ?? 0),
+    inputTokens: Number(row?.input ?? 0),
+    outputTokens: Number(row?.output ?? 0)
   }
 }

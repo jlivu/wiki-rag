@@ -33,7 +33,8 @@ export function assetLinksFrom (html: string, options: LinkScanOptions): string[
   return [...found]
 }
 
-function assetPathOf (href: string, options: LinkScanOptions): string | null {
+/** The asset path a link or an image source points at, or null. */
+export function assetPathOf (href: string, options: LinkScanOptions): string | null {
   let value = decodeHtml(href).trim()
   if (value.length === 0) { return null }
 

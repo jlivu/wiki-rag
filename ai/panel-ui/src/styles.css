@@ -432,6 +432,19 @@ pre,
   opacity: 0.85;
 }
 
+/* A description a model wrote, never mistaken for text in the picture. */
+.src-generated {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background-color: var(--primary-soft);
+  color: var(--primary);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .src-linked {
   display: block;
   margin-top: 5px;

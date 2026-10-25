@@ -60,6 +60,9 @@ function DocumentSource ({ item, number, locale }: { item: Source, number: numbe
     .filter(part => part && part.length > 0)
     .join(' · ')
   const linked = item.linkedFrom ?? []
+  // A description was written by a model, not read off the image: say so
+  // where the reader is looking, not only in the location line.
+  const generated = item.origin === 'description'
 
   return (
     <div className="src src-doc">
@@ -70,7 +73,14 @@ function DocumentSource ({ item, number, locale }: { item: Source, number: numbe
           {name}
           <NewTabHint />
         </a>
-        {where.length > 0 ? <span className="src-section">{where}</span> : null}
+        {where.length > 0 || generated
+          ? (
+            <span className="src-section">
+              {where}
+              {generated ? <span className="src-generated">generated, not read from the image</span> : null}
+            </span>
+            )
+          : null}
         <span className="src-path">{href}</span>
         <span className="src-snippet">{item.snippet}</span>
         {linked.length > 0
@@ -106,7 +116,9 @@ function Updated ({ at }: { at?: string }) {
 }
 
 function fileTypeLabel (fileType?: string): string {
-  return (fileType ?? '').trim().toUpperCase()
+  const type = (fileType ?? '').trim()
+  // "IMAGE" says nothing the icon has not already said.
+  return type.toLowerCase() === 'image' ? '' : type.toUpperCase()
 }
 
 function formatDate (value: string): string {

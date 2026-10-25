@@ -57,6 +57,9 @@ export interface RetrievedDocument extends RetrievedBase {
   fileSize: number
   /** Where in the file: "Page 4", "Sheet \"Budget\" rows 12–40". */
   location: string
+  /** For an image: 'ocr', 'alt' or 'description', so a generated
+   *  description can be labelled as one. */
+  origin: string
   /** The pages that link to this file, as far as the reader may see them. */
   linkedFrom: Array<{ title: string, path: string, locale: string }>
 }
@@ -217,6 +220,7 @@ function group (hits: ChunkHit[]): RetrievedItem[] {
           mime: first.mime,
           fileSize: first.fileSize,
           location: first.location,
+          origin: first.origin,
           anchor: first.anchor,
           snippet,
           updatedAt: first.updatedAt,

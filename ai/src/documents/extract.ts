@@ -18,5 +18,8 @@ export async function extractDocument (bytes: Buffer, docType: DocType): Promise
     case 'csv': return extractCsv(bytes)
     case 'markdown': return extractPlainText(bytes, true)
     case 'text': return extractPlainText(bytes, false)
+    // An image has no document structure to extract; indexer/image-job.ts
+    // reads it instead, and never calls this.
+    case 'image': return { sections: [] }
   }
 }

@@ -4,7 +4,8 @@
 import type { Pool } from 'pg'
 
 import {
-  existingEmbeddings, readPage, removePage, replaceDocumentLinks, replacePage, touchPage
+  documentIdsByPath, existingEmbeddings, imagePathsOnPage, readPage, removePage,
+  replaceDocumentLinks, replaceImageText, replacePage, touchPage, type PageImageText
 } from '../index-db/store.js'
 import type { QueuedJob } from '../index-db/queue.js'
 import { htmlToMarkdown } from '../wiki/markdown.js'
@@ -12,7 +13,8 @@ import type { WikiAdminClient, WikiPageSource } from '../wiki/admin-client.js'
 
 import { chunkMarkdown, estimateTokens, hash } from './chunker.js'
 import { toVectorLiteral, type Embedder } from './embeddings.js'
-import { assetLinksFrom, type LinkScanOptions } from './links.js'
+import { assetLinksFrom, assetPathOf, type LinkScanOptions } from './links.js'
+import { imagesIn } from './page-images.js'
 import { tocFromRender } from './toc.js'
 
 export interface JobOutcome {
@@ -22,6 +24,8 @@ export interface JobOutcome {
   /** How many uploaded files this page links to. */
   links?: number
   reason?: string
+  /** Whatever the job wants in its log line: OCR pages, describer tokens. */
+  [key: string]: unknown
 }
 
 export async function runJob (
@@ -29,7 +33,9 @@ export async function runJob (
   wiki: WikiAdminClient,
   embedder: Embedder,
   job: QueuedJob,
-  links: LinkScanOptions
+  links: LinkScanOptions,
+  /** Images whose alt text changed are re-indexed; the caller queues them. */
+  requeueDocuments?: (ids: number[]) => Promise<void>
 ): Promise<JobOutcome> {
   if (job.event === 'deleted') {
     await removePage(db, job.entityId)
@@ -93,7 +99,35 @@ export async function runJob (
   const linked = assetLinksFrom(page.render, links)
   await replaceDocumentLinks(db, page.id, linked)
 
-  return { action: 'indexed', chunks: rows.length, embedded: fresh.length, ...(linked.length > 0 ? { links: linked.length } : {}) }
+  // What this page calls the images it shows. An image is indexed with
+  // that text, so a change here has to reach the image as well.
+  const before = await imagePathsOnPage(db, page.id)
+  const images = pageImageText(page.render, links)
+  await replaceImageText(db, page.id, images)
+
+  if (requeueDocuments) {
+    const touched = [...new Set([...before, ...images.map(image => image.assetPath)])]
+    const ids = await documentIdsByPath(db, touched)
+    if (ids.length > 0) { await requeueDocuments(ids) }
+  }
+
+  return {
+    action: 'indexed',
+    chunks: rows.length,
+    embedded: fresh.length,
+    ...(linked.length > 0 ? { links: linked.length } : {}),
+    ...(images.length > 0 ? { images: images.length } : {})
+  }
+}
+
+/** The alt text and captions this page gives the images it shows. */
+function pageImageText (html: string, links: LinkScanOptions): PageImageText[] {
+  return imagesIn(html).flatMap(image => {
+    const path = assetPathOf(image.src, links)
+    if (!path) { return [] }
+    if (image.alt.length === 0 && image.caption.length === 0) { return [] }
+    return [{ assetPath: path, alt: image.alt, caption: image.caption }]
+  })
 }
 
 /**

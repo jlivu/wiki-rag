@@ -41,6 +41,8 @@ export interface RunSource {
   fileType: string
   /** Where in the file: "Page 4", "Sheet \"Budget\" rows 12–40". */
   location: string
+  /** For an image: 'ocr', 'alt' or 'description'. */
+  origin: string
   /** The pages that link to the file, as far as this reader may see. */
   linkedFrom: LinkingPageRef[]
 }
@@ -58,6 +60,7 @@ export interface SourceInput {
   fileName?: string
   fileType?: string
   location?: string
+  origin?: string
   linkedFrom?: LinkingPageRef[]
 }
 
@@ -93,6 +96,7 @@ export class SourceRegistry {
       if (!existing.snippet && input.snippet) { existing.snippet = input.snippet }
       if (!existing.updatedAt && input.updatedAt) { existing.updatedAt = input.updatedAt }
       if (!existing.location && input.location) { existing.location = input.location }
+      if (!existing.origin && input.origin) { existing.origin = input.origin }
       if (existing.linkedFrom.length === 0 && input.linkedFrom) { existing.linkedFrom = input.linkedFrom }
       if (input.read && !existing.read) {
         existing.read = true
@@ -117,6 +121,7 @@ export class SourceRegistry {
       fileName: input.fileName ?? '',
       fileType: input.fileType ?? '',
       location: input.location ?? '',
+      origin: input.origin ?? '',
       linkedFrom: input.linkedFrom ?? []
     }
     source.url = this.#url(source)

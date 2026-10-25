@@ -76,6 +76,7 @@ export function ClockIcon () {
  */
 export function FileIcon ({ type }: { type?: string }) {
   const kind = (type ?? '').toLowerCase()
+  if (kind === 'image') { return <ImageIcon /> }
   return (
     <svg {...base} className="file-icon">
       <path d="M9 1.8H4a1 1 0 0 0-1 1v10.4a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5.8L9 1.8Z" />
@@ -108,6 +109,17 @@ export function FileIcon ({ type }: { type?: string }) {
           </>
           )
         : null}
+    </svg>
+  )
+}
+
+/** A picture: a frame with a horizon and a sun, the usual shorthand. */
+export function ImageIcon () {
+  return (
+    <svg {...base} className="file-icon">
+      <rect x="2" y="3" width="12" height="10" rx="1.5" />
+      <circle cx="5.9" cy="6.6" r="1.1" />
+      <path d="M2.4 11.4 6 8.2l2.4 2.1L10.6 8l3 3.2" />
     </svg>
   )
 }

@@ -120,6 +120,10 @@ with no values; copy what you need.
 | `RECONCILE_MINUTES` | `30`                               | How often the index is compared with the page list. |
 | `INDEX_DB_URL`      | `postgres://wiki_ai:wiki_ai@ai-db:5432/wiki_ai` | The index database. |
 | `MAX_DOCUMENT_MB`   | `25`                               | Uploaded files larger than this are listed as skipped and never downloaded. |
+| `IMAGE_DESCRIBER`   | `anthropic`                        | Which model describes an image: `anthropic`, `ollama` or `off`. Falls back to `off` with no API key. |
+| `IMAGE_DESCRIBER_MODEL` | `claude-haiku-5-5`             | The vision model. `qwen3.5` when the describer is `ollama`. |
+| `IMAGE_DESCRIBE_EXCLUDE` | —                             | Asset folders whose images are never sent to a model. OCR and alt text still apply. |
+| `IMAGE_DESCRIBE_DAILY_LIMIT` | `200`                     | Descriptions a day, counted in the index so a restart does not reset it. |
 | `WIKI_PAGE_EXTENSIONS` | `md,html,txt`                   | Wiki.js's own `pageExtensions`. A file with one of these cannot be served as a file, so it is skipped. |
 
 Restart the service after editing `ai/.env` — `docker compose … up -d ai`
@@ -253,12 +257,17 @@ startup (`src/index-db/migrate.ts`):
   reconciliation does not keep retrying it.
 - `index_chunks` — the page **or** the document it belongs to (exactly one of
   the two, by a check constraint), the heading path, Wiki.js's anchor or a
-  PDF page fragment, where in a document it came from, the chunk text, a
+  PDF page fragment, where in a document it came from, where an image's text
+  came from (`origin`: `ocr`, `alt` or `description`), the chunk text, a
   content hash, the embedding, the model that produced it, and `fts`, a
   generated `tsvector`. An **HNSW** index covers the vectors and a **GIN**
   index covers `fts`.
 - `index_document_links` — which pages link to which file, filled in as each
   page is indexed.
+- `index_image_text` — the alt text and caption each page gives an image.
+- `index_image_descriptions` — one generated description per image content
+  hash, with the model and the tokens it cost. This is both the cache that
+  stops an image being described twice and the day's tally.
 - `index_queue` — one row per page or file waiting to be indexed, keyed by
   kind and id: a page and an asset can share a number.
 - `index_meta` — the embedding model and its width.
@@ -312,12 +321,13 @@ docker exec wiki-ai-db psql -U wiki_ai -d wiki_ai -c 'SELECT * FROM index_pages'
 Files uploaded through Wiki.js's asset manager are indexed alongside pages,
 so one search covers both and an answer can cite the file itself.
 
-**What is indexed.** PDF, DOCX, XLSX, PPTX and CSV. Everything else is
+**What is indexed.** PDF, DOCX, XLSX, PPTX, CSV and images — PNG, JPEG, WebP and the first frame of a GIF (see *Images* below). Everything else is
 recorded with the reason it was left out, which is also logged
-(`document not indexed`): an image, a file larger than `MAX_DOCUMENT_MB`
-(never downloaded — the size comes from the listing), a legacy `.doc`,
-`.xls` or `.ppt`, an unsupported type, or a PDF that is a scan with no text
-layer, which is kept as `needs_ocr` rather than treated as a failure.
+(`document not indexed`): a file larger than `MAX_DOCUMENT_MB` (never
+downloaded — the size comes from the listing), a legacy `.doc`, `.xls` or
+`.ppt`, an unsupported type, or an image in a format the bundled libvips
+cannot decode: HEIC (`convert it to JPEG to index it`), SVG, TIFF, BMP,
+AVIF and icons.
 
 A folder whose name is one or two characters is the other trap: Wiki.js
 reads the first segment of a URL as a locale, so a file in `it/` or `hr/`
@@ -361,7 +371,10 @@ service was down is picked up anyway.
 
 **Which pages link to a file.** As each page is indexed, its rendered HTML
 is scanned for links to assets and the pairs are written to
-`index_document_links`. Wiki.js has no table for this — `pageLinks` holds
+`index_document_links`. The same pass records what each page calls the
+images it shows — alt text, a `<figcaption>`, a caption line under the
+image, or a `"title"` — in `index_image_text`, and re-queues any image
+whose text changed. Wiki.js has no table for this — `pageLinks` holds
 page-to-page links only. A document source then shows "Linked from", with
 the pages the asking reader is allowed to open and no others.
 
@@ -371,6 +384,74 @@ check against the path (`server/controllers/common.js`) and answers 403 when
 it refuses. The indexer's download has already warmed the wiki's cache, so
 the check is cheap. `get_document` makes the same check before returning a
 word.
+
+### Images
+
+An image carries no text of its own, so three sources are tried and each
+becomes its own chunk, labelled with where it came from:
+
+| Origin | Shown as | Where it comes from |
+| ------ | -------- | ------------------- |
+| `ocr` | Text in image | Tesseract, run locally on the original file |
+| `alt` | Alt text | the alt text and captions of the pages that show it |
+| `description` | AI description | a vision model, when that is switched on |
+
+The same Tesseract reads a **scanned PDF** — one with no text layer, which
+used to be recorded as `needs_ocr` and left at that. Each page is rendered
+with `pdftoppm` at 150 dpi and read, so a citation still says "Page 4" and
+the link still opens there. A scan longer than 50 pages is read that far
+and the log says so; a scan with nothing legible on any page stays
+`needs_ocr`.
+
+Both tools are installed in the service's image (`ai/Dockerfile`):
+`tesseract-ocr`, `tesseract-ocr-eng` and `poppler-utils`, about 110 MB,
+most of it the ICU library Tesseract depends on. Tesseract always reads a
+file the service wrote itself, never stdin: handed bytes it cannot decode,
+it falls back to treating stdin as a *list of file paths* and OCRs those.
+
+**Before an image leaves the machine.** `src/images/prepare.ts` decodes it,
+bakes in the EXIF orientation, resizes it and re-encodes it as JPEG. That
+re-encoding is what removes the metadata — EXIF, XMP, IPTC and the colour
+profile all go — so a photograph's GPS position cannot reach a model even
+by accident. The only field ever read out of it is the capture date, with
+`exifr`'s top-level `pick`, which is the one form that does not hand back
+GPS alongside what was asked for. The date may be indexed; the position
+never is.
+
+The resize fits **both** of Anthropic's limits, a long edge and a visual
+token count. Capping the long edge alone is not enough: a 4032×3024
+photograph capped to 1568px is 2352 tokens against a 1568-token tier, and
+the API would quietly shrink it a second time.
+
+**What it costs, and what stops it.** A description is looked up by the
+image's **content hash**, so the same picture is never described twice,
+however often it is uploaded or re-indexed. `IMAGE_DESCRIBE_EXCLUDE` lists
+folders whose images are never sent at all — OCR and alt text still apply
+to them. `IMAGE_DESCRIBE_DAILY_LIMIT` caps the day's descriptions, counted
+from the index rather than from memory, so a restart does not reset it.
+Every image logs what it cost:
+
+```
+docker logs wiki-ai | grep 'indexed a document'
+{"documentId":17,"action":"indexed","chunks":2,"ocrChars":191,"described":"fresh",
+ "describeModel":"claude-haiku-5-5","describeInputTokens":1774,"describeOutputTokens":400,
+ "sentPixels":"1311x901","sentTokens":1551}
+```
+
+`described` says what happened: `fresh`, `cached`, `off`, `excluded`,
+`over-limit`, `unreadable` or `empty`.
+
+The model is asked for a factual description and any text it can read, and
+told not to guess. What it writes goes into the index behind "Generated
+description of this image:", is labelled **AI description** in the sources
+card with a "generated, not read from the image" badge beside it, and the
+agent is told to prefer the text read from the picture when the two
+disagree.
+
+An image is re-read every time it is queued, unlike a document: some of
+its text comes from outside the file, so a page that gains a caption makes
+the image stale without changing a byte of it. Re-reading is cheap — OCR
+is local and the description comes from the cache.
 
 ### Routes for the wiki, not for readers
 

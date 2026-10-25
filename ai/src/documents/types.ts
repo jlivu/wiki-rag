@@ -10,6 +10,8 @@
 export interface DocSection {
   /** Shown to the reader: `Page 4`, `Section "Pricing"`, `Slide 7`. */
   label: string
+  /** For an image: where this text came from — 'ocr', 'alt' or 'description'. */
+  origin?: string
   /** URL fragment that opens that place, or '' when there is none. */
   anchor: string
   /** The section's text, one line per row when the lines are rows. */

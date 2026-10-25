@@ -26,7 +26,8 @@ export function Citation ({ marker, sources, locale }: {
 
   const where = [
     source.kind === 'document' ? (source.fileName ?? source.title) : source.title,
-    source.kind === 'document' ? (source.location ?? source.section) : source.section
+    source.kind === 'document' ? (source.location ?? source.section) : source.section,
+    source.origin === 'description' ? 'written by AI' : ''
   ].filter(Boolean).join(' › ')
   return (
     <a className="cite" href={sourceHref(source, locale)} title={where} {...NEW_TAB_LINK}>

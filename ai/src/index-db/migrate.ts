@@ -145,6 +145,36 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE index_queue DROP CONSTRAINT IF EXISTS index_queue_pkey;
       ALTER TABLE index_queue ADD PRIMARY KEY (kind, entity_id);
     `
+  },
+  {
+    // An image's text comes from three different places, and a reader has
+    // to be told which: a chunk records where its text came from.
+    name: '010-images',
+    sql: `
+      ALTER TABLE index_chunks ADD COLUMN IF NOT EXISTS origin text NOT NULL DEFAULT '';
+
+      -- One description per image content, not per image: the same picture
+      -- uploaded twice, or re-indexed, is never described twice.
+      CREATE TABLE IF NOT EXISTS index_image_descriptions (
+        content_hash  text PRIMARY KEY,
+        model         text NOT NULL,
+        text          text NOT NULL,
+        input_tokens  integer NOT NULL DEFAULT 0,
+        output_tokens integer NOT NULL DEFAULT 0,
+        created_at    timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS index_image_descriptions_day ON index_image_descriptions (created_at);
+
+      -- The alt text and captions a page gives an image it shows.
+      CREATE TABLE IF NOT EXISTS index_image_text (
+        asset_path text NOT NULL,
+        page_id    integer NOT NULL REFERENCES index_pages (id) ON DELETE CASCADE,
+        alt        text NOT NULL DEFAULT '',
+        caption    text NOT NULL DEFAULT '',
+        PRIMARY KEY (asset_path, page_id)
+      );
+      CREATE INDEX IF NOT EXISTS index_image_text_page ON index_image_text (page_id);
+    `
   }
 ]
 

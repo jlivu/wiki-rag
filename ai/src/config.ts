@@ -44,6 +44,17 @@ export interface IndexConfig {
   pageExtensions: string[]
 }
 
+/** Reading pictures: OCR is local and free, a description is neither. */
+export interface ImageConfig {
+  /** Which vision model describes an image, or 'off' for none. */
+  describer: 'anthropic' | 'ollama' | 'off'
+  describerModel: string
+  /** Asset folders whose images are never sent to a model, by path prefix. */
+  describeExclude: string[]
+  /** Descriptions a day, counted across the service. */
+  describeDailyLimit: number
+}
+
 /** The MCP server for outside agents. */
 export interface McpConfig {
   /** Tool calls per key per minute. */
@@ -64,6 +75,7 @@ export interface Config {
   mcp: McpConfig
   llm: LlmConfig
   index: IndexConfig
+  images: ImageConfig
 }
 
 const DEFAULT_MODELS: Record<ProviderId, string> = {
@@ -113,8 +125,37 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
       maxDocumentBytes: readInt(env.MAX_DOCUMENT_MB, 25) * 1024 * 1024,
       pageExtensions: (readList(env.WIKI_PAGE_EXTENSIONS) ?? ['md', 'html', 'txt'])
         .map(ext => ext.replace(/^\./, '').toLowerCase())
+    },
+    images: {
+      describer: readDescriber(env.IMAGE_DESCRIBER, provider),
+      describerModel: nonEmpty(env.IMAGE_DESCRIBER_MODEL) ??
+        (readDescriber(env.IMAGE_DESCRIBER, provider) === 'ollama' ? 'qwen3.5' : 'claude-haiku-5-5'),
+      describeExclude: (readList(env.IMAGE_DESCRIBE_EXCLUDE) ?? [])
+        .map(folder => folder.replace(/^\/+|\/+$/g, '').toLowerCase())
+        .filter(folder => folder.length > 0),
+      describeDailyLimit: readInt(env.IMAGE_DESCRIBE_DAILY_LIMIT, 200)
     }
   }
+}
+
+/**
+ * Which model describes images. Anthropic by default, but only when there
+ * is a key for it: with none, descriptions are simply off and the rest of
+ * image indexing — the text in the picture, the alt text — carries on.
+ */
+function readDescriber (
+  value: string | undefined,
+  provider: ProviderId
+): 'anthropic' | 'ollama' | 'off' {
+  const name = (value ?? 'anthropic').trim().toLowerCase()
+  if (name !== 'anthropic' && name !== 'ollama' && name !== 'off') {
+    throw new Error(`IMAGE_DESCRIBER must be anthropic, ollama or off (got "${value}")`)
+  }
+  // A mock run must not reach for a cloud model it has no key for.
+  if (name === 'anthropic' && provider === 'mock' && (process.env.ANTHROPIC_API_KEY ?? '').length === 0) {
+    return 'off'
+  }
+  return name
 }
 
 /** Safe to log: it names the settings without revealing any of them. */
@@ -133,6 +174,10 @@ export function describeConfig (config: Config): Record<string, unknown> {
     reconcileMinutes: config.index.reconcileMinutes,
     hasWikiApiKey: config.index.wikiApiKey.length > 0,
     maxDocumentMb: Math.round(config.index.maxDocumentBytes / (1024 * 1024)),
+    imageDescriber: config.images.describer,
+    imageDescriberModel: config.images.describer === 'off' ? null : config.images.describerModel,
+    imageDescribeExclude: config.images.describeExclude,
+    imageDescribeDailyLimit: config.images.describeDailyLimit,
     pageExtensions: config.index.pageExtensions,
     wikiPublicUrl: config.wikiPublicUrl,
     mcpRateLimitPerMinute: config.mcp.rateLimitPerMinute

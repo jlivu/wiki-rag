@@ -23,6 +23,8 @@ import { WikiAdminClient } from '../wiki/admin-client.js'
 
 import { PermissionCache } from '../wiki/permission-cache.js'
 
+import { createImageDescriber, type ImageDescriber } from '../images/describe.js'
+
 import { AssetDirectory } from './asset-directory.js'
 import { runDocumentJob } from './document-job.js'
 import { Embedder } from './embeddings.js'
@@ -49,6 +51,7 @@ export class Indexer {
   readonly #embedder: Embedder
   readonly #retriever: Retriever
   readonly #assets: AssetDirectory
+  readonly #describer: ImageDescriber
 
   #ready = false
   #reason: string | undefined
@@ -65,6 +68,7 @@ export class Indexer {
     this.#wiki = new WikiAdminClient(config.wikiUrl, config.index.wikiApiKey)
     this.#embedder = new Embedder(config.llm.ollamaUrl, config.index.embedModel)
     this.#assets = new AssetDirectory(this.#wiki)
+    this.#describer = createImageDescriber(config)
     this.#retriever = new Retriever(this.#db, this.#embedder, new PermissionCache(), this.#log)
   }
 
@@ -119,6 +123,13 @@ export class Indexer {
       void (rebuildChunks ? this.reindexEverything() : this.reconcile('startup'))
     }, RECONCILE_START_DELAY_MS)
     if (rebuildChunks) { this.#log.info('re-indexing: chunks now carry section anchors') }
+    this.#log.info({
+      describer: this.#describer.id,
+      ...(this.#describer.id === 'off' ? {} : { model: this.#describer.model }),
+      dailyLimit: this.#config.images.describeDailyLimit,
+      excluded: this.#config.images.describeExclude
+    }, 'image indexing ready')
+
     const everyMs = Math.max(1, this.#config.index.reconcileMinutes) * 60_000
     this.#reconcileTimer = setInterval(() => { void this.reconcile('scheduled') }, everyMs)
   }
@@ -325,9 +336,19 @@ export class Indexer {
         ? await runDocumentJob(this.#db, this.#wiki, this.#embedder, job, {
           maxBytes: this.#config.index.maxDocumentBytes,
           pageExtensions: this.#config.index.pageExtensions,
-          findAsset: id => this.#assets.find(id)
+          findAsset: id => this.#assets.find(id),
+          images: {
+            excludeFolders: this.#config.images.describeExclude,
+            dailyLimit: this.#config.images.describeDailyLimit,
+            describer: this.#describer
+          }
         })
-        : await runJob(this.#db, this.#wiki, this.#embedder, job, this.#links)
+        : await runJob(this.#db, this.#wiki, this.#embedder, job, this.#links, async ids => {
+          // A changed caption makes the image stale, not the page.
+          for (const id of ids) {
+            await enqueueIfAbsent(this.#db, { kind: 'document', entityId: id, event: 'updated' })
+          }
+        })
       await complete(this.#db, job)
 
       const message = job.kind === 'document' ? 'indexed a document' : 'indexed a page'

@@ -231,6 +231,7 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
                 fileName: source.fileName || source.title,
                 ...(source.fileType ? { fileType: source.fileType } : {}),
                 ...(source.location ? { location: source.location } : {}),
+                ...(source.origin ? { origin: source.origin } : {}),
                 ...(source.linkedFrom.length > 0
                   ? { linkedFrom: source.linkedFrom.map(page => ({ title: page.title, path: page.path, locale: page.locale })) }
                   : {})

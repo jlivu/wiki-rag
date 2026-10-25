@@ -43,6 +43,11 @@ export interface Source extends PageLink {
   fileType?: string
   /** Documents: where in the file, e.g. "Page 4" or "Slide 7". */
   location?: string
+  /**
+   * Images: where this text came from — 'ocr' (text in the image), 'alt'
+   * (what the pages call it) or 'description' (written by a model).
+   */
+  origin?: string
   /** Documents: the pages that link to the file. */
   linkedFrom?: PageLink[]
 }
@@ -147,6 +152,7 @@ export const PANEL_TOOL_SCHEMAS: Record<PanelToolName, Record<string, unknown>> 
             fileName: { type: 'string', description: 'For a file: its name, e.g. "generator-manual.pdf".' },
             fileType: { type: 'string', description: 'For a file: pdf, docx, xlsx, pptx or csv.' },
             location: { type: 'string', description: 'For a file: where in it, e.g. "Page 4" or "Slide 7".' },
+            origin: { type: 'string', enum: ['ocr', 'alt', 'description'], description: 'For an image: whether the text was read from the image, taken from a page\'s alt text, or written by a model.' },
             linkedFrom: {
               type: 'array',
               description: 'For a file: the wiki pages that link to it.',
@@ -293,6 +299,7 @@ function readSource (value: unknown, path: string): Source {
     ...optional('fileName', optStr(item.fileName, `${path}.fileName`)),
     ...optional('fileType', optStr(item.fileType, `${path}.fileType`)),
     ...optional('location', optStr(item.location, `${path}.location`)),
+    ...optional('origin', optStr(item.origin, `${path}.origin`)),
     ...(linkedFrom === undefined ? {} : { linkedFrom })
   }
 }

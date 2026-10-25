@@ -23,6 +23,8 @@ export interface DocChunk {
   location: string
   /** "#page=4", or '' when the format has nowhere to jump to. */
   anchor: string
+  /** For an image: 'ocr', 'alt' or 'description'. Empty otherwise. */
+  origin: string
   text: string
   contentHash: string
   tokens: number
@@ -46,6 +48,7 @@ export function chunkDocument (fileName: string, sections: DocSection[]): DocChu
         headingPath: section.label,
         location: piece.location,
         anchor: section.anchor,
+        origin: section.origin ?? '',
         text,
         contentHash: hash(text),
         tokens: estimateTokens(text)

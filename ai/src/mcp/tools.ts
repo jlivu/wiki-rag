@@ -80,6 +80,10 @@ export async function searchWiki (
             // Straight to the page of the PDF, where the format allows it.
             url: fileUrl(ctx.publicUrl, item.path, item.anchor),
             location: item.location,
+            ...(item.origin ? { origin: item.origin } : {}),
+            ...(item.origin === 'description'
+              ? { note: 'This text is a generated description of the image, not text printed in it.' }
+              : {}),
             snippet: item.snippet,
             updatedAt: item.updatedAt,
             ...(item.linkedFrom.length > 0

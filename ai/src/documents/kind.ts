@@ -6,13 +6,18 @@
  */
 import type { DocumentMeta } from './types.js'
 
-export type DocType = 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'csv' | 'text' | 'markdown'
+export type DocType = 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'csv' | 'text' | 'markdown' | 'image'
 
 export type Classification =
   | { index: true, docType: DocType }
   | { index: false, reason: string }
 
 const BY_EXTENSION: Record<string, DocType> = {
+  '.png': 'image',
+  '.jpg': 'image',
+  '.jpeg': 'image',
+  '.webp': 'image',
+  '.gif': 'image',
   '.pdf': 'pdf',
   '.docx': 'docx',
   '.xlsx': 'xlsx',
@@ -24,13 +29,20 @@ const BY_EXTENSION: Record<string, DocType> = {
 }
 
 /**
- * Wiki.js decides image-or-binary from the MIME type the browser sent, and
- * a file uploaded by a script may arrive as application/octet-stream. The
- * extension is checked too, so a picture is always reported as a picture.
+ * Pictures we cannot read. HEIC needs a codec the bundled libvips does not
+ * carry; the rest are either vector art or formats no vision model takes.
+ * Anything not listed here and matched in BY_EXTENSION is indexed.
  */
-const IMAGE_EXTENSIONS = [
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.bmp', '.tif', '.tiff', '.ico', '.avif', '.heic'
-]
+const UNREADABLE_IMAGES: Record<string, string> = {
+  '.heic': 'a HEIC image; convert it to JPEG to index it',
+  '.heif': 'a HEIF image; convert it to JPEG to index it',
+  '.svg': 'an SVG drawing, which has no pixels to read',
+  '.bmp': 'a BMP image; convert it to PNG or JPEG to index it',
+  '.tif': 'a TIFF image; convert it to PNG or JPEG to index it',
+  '.tiff': 'a TIFF image; convert it to PNG or JPEG to index it',
+  '.ico': 'an icon',
+  '.avif': 'an AVIF image; convert it to JPEG to index it'
+}
 
 /** Saved by a version of Office old enough that the file is not a zip. */
 const LEGACY: Record<string, string> = {
@@ -55,20 +67,20 @@ export interface ClassifyInput extends DocumentMeta {
 export function classify (input: ClassifyInput): Classification {
   const ext = input.ext.toLowerCase()
 
-  if (
-    input.assetKind.toLowerCase() === 'image' ||
-    input.mime.startsWith('image/') ||
-    IMAGE_EXTENSIONS.includes(ext)
-  ) {
-    return { index: false, reason: 'an image' }
-  }
+  const unreadable = UNREADABLE_IMAGES[ext]
+  if (unreadable) { return { index: false, reason: unreadable } }
 
   const legacy = LEGACY[ext]
   if (legacy) { return { index: false, reason: legacy } }
 
   const docType = BY_EXTENSION[ext]
   if (!docType) {
-    return { index: false, reason: `an unsupported file type (${ext || input.mime || 'unknown'})` }
+    // Wiki.js calls anything it recognises as a picture an "image"; if we
+    // got here the extension is one we cannot read.
+    const kind = input.assetKind.toLowerCase() === 'image' || input.mime.startsWith('image/')
+      ? 'an image in a format we cannot read'
+      : `an unsupported file type (${ext || input.mime || 'unknown'})`
+    return { index: false, reason: kind }
   }
 
   if (input.pageExtensions.includes(ext.replace(/^\./, ''))) {
