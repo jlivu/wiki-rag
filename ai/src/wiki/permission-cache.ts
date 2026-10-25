@@ -18,11 +18,14 @@ interface Entry {
   expires: number
 }
 
+/** A page and a file can share a path; the kind keeps them apart. */
+export type ResourceKind = 'page' | 'document'
+
 export class PermissionCache {
   readonly #entries = new Map<string, Entry>()
 
-  get (token: string | null, locale: string, path: string): boolean | undefined {
-    const key = cacheKey(token, locale, path)
+  get (token: string | null, kind: ResourceKind, locale: string, path: string): boolean | undefined {
+    const key = cacheKey(token, kind, locale, path)
     const entry = this.#entries.get(key)
     if (!entry) { return undefined }
     if (entry.expires < Date.now()) {
@@ -32,18 +35,18 @@ export class PermissionCache {
     return entry.readable
   }
 
-  set (token: string | null, locale: string, path: string, readable: boolean): void {
+  set (token: string | null, kind: ResourceKind, locale: string, path: string, readable: boolean): void {
     if (this.#entries.size >= MAX_ENTRIES) {
       // Cheap eviction: drop the oldest insertion.
       const oldest = this.#entries.keys().next()
       if (!oldest.done) { this.#entries.delete(oldest.value) }
     }
-    this.#entries.set(cacheKey(token, locale, path), { readable, expires: Date.now() + TTL_MS })
+    this.#entries.set(cacheKey(token, kind, locale, path), { readable, expires: Date.now() + TTL_MS })
   }
 }
 
 /** The token is hashed so no login token is held as a map key. */
-function cacheKey (token: string | null, locale: string, path: string): string {
+function cacheKey (token: string | null, kind: ResourceKind, locale: string, path: string): string {
   const who = token ? createHash('sha256').update(token).digest('hex').slice(0, 32) : 'guest'
-  return `${who}\n${locale}\n${path}`
+  return `${who}\n${kind}\n${locale}\n${path}`
 }

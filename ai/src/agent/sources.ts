@@ -8,33 +8,57 @@
  * marker that matches nothing is dropped rather than rendered.
  */
 
-export interface RunSource {
-  /** What the model cites: S1, S2, … */
-  id: string
+/** A page, or an uploaded file. */
+export type SourceKind = 'page' | 'document'
+
+export interface LinkingPageRef {
   title: string
   path: string
   locale: string
-  /** Wiki.js's anchor for the most relevant section, e.g. "#scope". */
+}
+
+export interface RunSource {
+  /** What the model cites: S1, S2, … */
+  id: string
+  kind: SourceKind
+  title: string
+  path: string
+  /** Empty for a document: uploaded files are not localised. */
+  locale: string
+  /** Wiki.js's anchor for the section, or "#page=4" in a PDF. */
   anchor: string
   /** Heading path of that section, for the card. */
   section: string
   snippet: string
   updatedAt: string
-  /** Where a reader opens it, section included. */
+  /** Where a reader opens it, section or page included. */
   url: string
-  /** True once the page was actually read, not merely listed. */
+  /** True once the page or file was actually read, not merely listed. */
   read: boolean
+  /* Documents only. */
+  fileName: string
+  /** pdf, docx, xlsx, pptx, csv — what the panel draws an icon from. */
+  fileType: string
+  /** Where in the file: "Page 4", "Sheet \"Budget\" rows 12–40". */
+  location: string
+  /** The pages that link to the file, as far as this reader may see. */
+  linkedFrom: LinkingPageRef[]
 }
 
 export interface SourceInput {
+  kind?: SourceKind
   title: string
   path: string
-  locale: string
+  locale?: string
   anchor?: string
   section?: string
   snippet?: string
   updatedAt?: string
   read?: boolean
+  fileName?: string
+  fileType?: string
+  location?: string
+  linkedFrom?: LinkingPageRef[]
 }
 
 export class SourceRegistry {
@@ -57,8 +81,10 @@ export class SourceRegistry {
    * entry, so one page is one source for the whole run.
    */
   register (input: SourceInput): RunSource {
+    const kind = input.kind ?? 'page'
     const path = input.path.replace(/^\/+/, '')
-    const key = `${input.locale}\n${path}`
+    const locale = kind === 'document' ? '' : (input.locale ?? '')
+    const key = `${kind}\n${locale}\n${path}`
     const existing = this.#byPage.get(key)
 
     if (existing) {
@@ -66,6 +92,8 @@ export class SourceRegistry {
       if (!existing.section && input.section) { existing.section = input.section }
       if (!existing.snippet && input.snippet) { existing.snippet = input.snippet }
       if (!existing.updatedAt && input.updatedAt) { existing.updatedAt = input.updatedAt }
+      if (!existing.location && input.location) { existing.location = input.location }
+      if (existing.linkedFrom.length === 0 && input.linkedFrom) { existing.linkedFrom = input.linkedFrom }
       if (input.read && !existing.read) {
         existing.read = true
         this.#readOrder.push(existing.id)
@@ -76,15 +104,20 @@ export class SourceRegistry {
 
     const source: RunSource = {
       id: `S${this.#byPage.size + 1}`,
+      kind,
       title: input.title || path,
       path,
-      locale: input.locale,
+      locale,
       anchor: input.anchor ?? '',
       section: input.section ?? '',
       snippet: input.snippet ?? '',
       updatedAt: input.updatedAt ?? '',
       url: '',
-      read: input.read === true
+      read: input.read === true,
+      fileName: input.fileName ?? '',
+      fileType: input.fileType ?? '',
+      location: input.location ?? '',
+      linkedFrom: input.linkedFrom ?? []
     }
     source.url = this.#url(source)
     this.#byPage.set(key, source)
@@ -122,7 +155,11 @@ export class SourceRegistry {
   }
 
   #url (source: RunSource): string {
-    return `${this.#publicUrl}/${source.locale}/${source.path}${source.anchor}`
+    // An uploaded file sits at the site root with no locale segment: the
+    // catch-all route strips one, so adding it would be wrong by luck.
+    return source.kind === 'document'
+      ? `${this.#publicUrl}/${source.path}${source.anchor}`
+      : `${this.#publicUrl}/${source.locale}/${source.path}${source.anchor}`
   }
 }
 

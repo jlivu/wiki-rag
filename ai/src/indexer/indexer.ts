@@ -14,15 +14,20 @@ import { ANCHOR_MIGRATION, ensureEmbeddingColumn, migrate, readMeta } from '../i
 import { getPool } from '../index-db/pool.js'
 import {
   claim, complete, enqueue, enqueueIfAbsent, fail, queueDepth,
-  type PageEvent, type QueuedJob
+  type IndexEvent, type QueuedJob
 } from '../index-db/queue.js'
-import { listIndexedPages, readStats, removePage, type IndexStats } from '../index-db/store.js'
+import {
+  listIndexedDocuments, listIndexedPages, readStats, removeDocument, removePage, type IndexStats
+} from '../index-db/store.js'
 import { WikiAdminClient } from '../wiki/admin-client.js'
 
 import { PermissionCache } from '../wiki/permission-cache.js'
 
+import { AssetDirectory } from './asset-directory.js'
+import { runDocumentJob } from './document-job.js'
 import { Embedder } from './embeddings.js'
 import { runJob } from './job.js'
+import type { LinkScanOptions } from './links.js'
 import { Retriever } from './retrieval.js'
 
 const IDLE_POLL_MS = 1000
@@ -43,6 +48,7 @@ export class Indexer {
   readonly #wiki: WikiAdminClient
   readonly #embedder: Embedder
   readonly #retriever: Retriever
+  readonly #assets: AssetDirectory
 
   #ready = false
   #reason: string | undefined
@@ -58,13 +64,27 @@ export class Indexer {
     this.#db = getPool(config.index.databaseUrl)
     this.#wiki = new WikiAdminClient(config.wikiUrl, config.index.wikiApiKey)
     this.#embedder = new Embedder(config.llm.ollamaUrl, config.index.embedModel)
+    this.#assets = new AssetDirectory(this.#wiki)
     this.#retriever = new Retriever(this.#db, this.#embedder, new PermissionCache(), this.#log)
+  }
+
+  /** Where an asset link in a page points, and what is not a file. */
+  get #links (): LinkScanOptions {
+    return {
+      origins: [this.#config.wikiUrl, this.#config.wikiPublicUrl].filter(url => url.length > 0),
+      pageExtensions: this.#config.index.pageExtensions
+    }
   }
 
   /** What search_wiki queries. It decides for itself whether it can
    *  answer, so the agent does not have to know the indexer's state. */
   get retriever (): Retriever {
     return this.#retriever
+  }
+
+  /** The index database, for reading a document's extracted text. */
+  get database (): Pool {
+    return this.#db
   }
 
   get enabled (): boolean {
@@ -134,14 +154,27 @@ export class Indexer {
   }
 
   async enqueuePageEvent (event: {
-    event: PageEvent
+    event: IndexEvent
     id: number
     path?: string | null
     locale?: string | null
   }): Promise<void> {
     await enqueue(
       this.#db,
-      { pageId: event.id, event: event.event, path: event.path ?? null, locale: event.locale ?? null },
+      { kind: 'page', entityId: event.id, event: event.event, path: event.path ?? null, locale: event.locale ?? null },
+      this.#config.index.debounceSeconds
+    )
+  }
+
+  /** A file was uploaded, renamed or deleted in the asset manager. */
+  async enqueueAssetEvent (event: {
+    event: IndexEvent
+    id: number
+    path?: string | null
+  }): Promise<void> {
+    await enqueue(
+      this.#db,
+      { kind: 'document', entityId: event.id, event: event.event, path: event.path ?? null },
       this.#config.index.debounceSeconds
     )
   }
@@ -154,19 +187,21 @@ export class Indexer {
     if (!this.#ready) { return null }
 
     try {
-      const [wikiPages, indexed] = await Promise.all([
+      const [wikiPages, indexedPages, wikiAssets, indexedDocuments] = await Promise.all([
         this.#wiki.listPages(),
-        listIndexedPages(this.#db)
+        listIndexedPages(this.#db),
+        this.#assets.list(true),
+        listIndexedDocuments(this.#db)
       ])
 
       const live = new Map(wikiPages.filter(page => page.isPublished).map(page => [page.id, page]))
-      const have = new Map(indexed.map(page => [page.id, page.updatedAt]))
+      const have = new Map(indexedPages.map(page => [page.id, page.updatedAt]))
 
       let queued = 0
       for (const [id, page] of live) {
         const seen = have.get(id)
         if (seen === undefined || !sameInstant(seen, page.updatedAt)) {
-          await enqueueIfAbsent(this.#db, { pageId: id, event: 'updated', path: page.path, locale: page.locale })
+          await enqueueIfAbsent(this.#db, { kind: 'page', entityId: id, event: 'updated', path: page.path, locale: page.locale })
           queued += 1
         }
       }
@@ -179,8 +214,45 @@ export class Indexer {
         }
       }
 
-      this.#log.info({ trigger, wikiPages: live.size, indexed: have.size, queued, removed }, 'reconciled')
-      return { queued, removed }
+      // Uploaded files, the same way. A file that was looked at and left
+      // out — an image, one too large — stays recorded, so it is not
+      // queued again every half hour.
+      const liveFiles = new Map(wikiAssets.map(asset => [asset.id, asset]))
+      const haveFiles = new Map(indexedDocuments.map(document => [document.id, document]))
+
+      let queuedFiles = 0
+      for (const [id, asset] of liveFiles) {
+        const seen = haveFiles.get(id)
+        const changed = seen === undefined ||
+          seen.path !== asset.path ||
+          seen.fileSize !== asset.fileSize ||
+          !sameInstant(seen.updatedAt, asset.updatedAt)
+        if (changed) {
+          await enqueueIfAbsent(this.#db, { kind: 'document', entityId: id, event: 'updated', path: asset.path })
+          queuedFiles += 1
+        }
+      }
+
+      let removedFiles = 0
+      for (const id of haveFiles.keys()) {
+        if (!liveFiles.has(id)) {
+          await removeDocument(this.#db, id)
+          removedFiles += 1
+        }
+      }
+
+      this.#log.info({
+        trigger,
+        wikiPages: live.size,
+        indexed: have.size,
+        queued,
+        removed,
+        wikiFiles: liveFiles.size,
+        indexedFiles: haveFiles.size,
+        queuedFiles,
+        removedFiles
+      }, 'reconciled')
+      return { queued: queued + queuedFiles, removed: removed + removedFiles }
     } catch (err) {
       this.#log.warn({ err, trigger }, 'reconciliation failed')
       return null
@@ -191,6 +263,7 @@ export class Indexer {
   async reindexEverything (): Promise<{ queued: number }> {
     if (!this.enabled) { return { queued: 0 } }
     await this.#db.query('TRUNCATE index_pages CASCADE')
+    await this.#db.query('TRUNCATE index_documents CASCADE')
     const result = await this.reconcile('reindex')
     return { queued: result?.queued ?? 0 }
   }
@@ -246,14 +319,29 @@ export class Indexer {
 
   async #process (job: QueuedJob): Promise<void> {
     const startedAt = Date.now()
+    const what = job.kind === 'document' ? { documentId: job.entityId } : { pageId: job.entityId }
     try {
-      const outcome = await runJob(this.#db, this.#wiki, this.#embedder, job)
-      await complete(this.#db, job.pageId)
-      this.#log.info({ pageId: job.pageId, event: job.event, ms: Date.now() - startedAt, ...outcome }, 'indexed a page')
+      const outcome = job.kind === 'document'
+        ? await runDocumentJob(this.#db, this.#wiki, this.#embedder, job, {
+          maxBytes: this.#config.index.maxDocumentBytes,
+          pageExtensions: this.#config.index.pageExtensions,
+          findAsset: id => this.#assets.find(id)
+        })
+        : await runJob(this.#db, this.#wiki, this.#embedder, job, this.#links)
+      await complete(this.#db, job)
+
+      const message = job.kind === 'document' ? 'indexed a document' : 'indexed a page'
+      // A file left out of the index is the one thing an administrator has
+      // to be able to find in the log, so say so plainly.
+      if (job.kind === 'document' && outcome.action === 'skipped' && outcome.reason !== 'unchanged') {
+        this.#log.info({ ...what, path: job.path, ms: Date.now() - startedAt, ...outcome }, 'document not indexed')
+        return
+      }
+      this.#log.info({ ...what, event: job.event, ms: Date.now() - startedAt, ...outcome }, message)
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
       const { dropped } = await fail(this.#db, job, reason)
-      this.#log.warn({ pageId: job.pageId, event: job.event, attempts: job.attempts + 1, dropped, err }, 'indexing failed')
+      this.#log.warn({ ...what, event: job.event, attempts: job.attempts + 1, dropped, err }, 'indexing failed')
     }
   }
 }

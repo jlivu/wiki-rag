@@ -106,6 +106,7 @@ export function agentRoutes (config: Config, indexer: Indexer): FastifyPluginAsy
             token,
             defaultLocale: page?.locale ?? 'en',
             retriever: indexer.retriever,
+            index: indexer.database,
             // One registry per run: it hands out the S1, S2 ids and turns
             // them back into links from what the tools returned.
             sources: new SourceRegistry(config.wikiPublicUrl),

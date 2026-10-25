@@ -24,7 +24,10 @@ export function Citation ({ marker, sources, locale }: {
     return <span className="cite cite-plain">{marker}</span>
   }
 
-  const where = [source.title, source.section].filter(Boolean).join(' › ')
+  const where = [
+    source.kind === 'document' ? (source.fileName ?? source.title) : source.title,
+    source.kind === 'document' ? (source.location ?? source.section) : source.section
+  ].filter(Boolean).join(' › ')
   return (
     <a className="cite" href={sourceHref(source, locale)} title={where} {...NEW_TAB_LINK}>
       <span aria-hidden="true">{number}</span>

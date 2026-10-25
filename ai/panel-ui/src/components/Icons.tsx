@@ -68,3 +68,46 @@ export function ClockIcon () {
     </svg>
   )
 }
+
+/**
+ * An uploaded file. The outline is the same sheet of paper for every type;
+ * what is drawn on it says which type it is, so a spreadsheet and a slide
+ * deck do not look alike at 13 pixels.
+ */
+export function FileIcon ({ type }: { type?: string }) {
+  const kind = (type ?? '').toLowerCase()
+  return (
+    <svg {...base} className="file-icon">
+      <path d="M9 1.8H4a1 1 0 0 0-1 1v10.4a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5.8L9 1.8Z" />
+      <polyline points="9,1.8 9,5.8 13,5.8" />
+      {kind === 'xlsx' || kind === 'csv'
+        ? (
+          <>
+            <rect x="4.9" y="7.6" width="6.2" height="4.3" rx="0.4" />
+            <line x1="4.9" y1="9.75" x2="11.1" y2="9.75" />
+            <line x1="8" y1="7.6" x2="8" y2="11.9" />
+          </>
+          )
+        : null}
+      {kind === 'pptx'
+        ? <rect x="4.9" y="7.8" width="6.2" height="4" rx="0.5" />
+        : null}
+      {kind === 'pdf'
+        ? (
+          <>
+            <line x1="5" y1="8.6" x2="11" y2="8.6" />
+            <path d="M5 11.9c1.5 0 2.4-1 2.7-2.1.3 1.3 1.4 2.1 3.3 1.7" />
+          </>
+          )
+        : null}
+      {kind !== 'xlsx' && kind !== 'csv' && kind !== 'pptx' && kind !== 'pdf'
+        ? (
+          <>
+            <line x1="5" y1="8.6" x2="11" y2="8.6" />
+            <line x1="5" y1="11" x2="9.4" y2="11" />
+          </>
+          )
+        : null}
+    </svg>
+  )
+}

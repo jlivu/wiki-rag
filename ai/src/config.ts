@@ -34,6 +34,14 @@ export interface IndexConfig {
   wikiApiKey: string
   /** The wiki's own locale, used when a caller does not say. */
   defaultLocale: string
+  /** Uploaded files larger than this are listed as skipped, not indexed. */
+  maxDocumentBytes: number
+  /**
+   * Wiki.js's own `pageExtensions` setting. A file ending in one of these
+   * is served as a page, not as a file, so it can be neither downloaded nor
+   * permission-checked and is left out of the index.
+   */
+  pageExtensions: string[]
 }
 
 /** The MCP server for outside agents. */
@@ -101,7 +109,10 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
       debounceSeconds: readInt(env.INDEX_DEBOUNCE_SECONDS, 10),
       reconcileMinutes: readInt(env.RECONCILE_MINUTES, 30),
       wikiApiKey: env.WIKI_API_KEY ?? '',
-      defaultLocale: nonEmpty(env.WIKI_LOCALE) ?? 'en'
+      defaultLocale: nonEmpty(env.WIKI_LOCALE) ?? 'en',
+      maxDocumentBytes: readInt(env.MAX_DOCUMENT_MB, 25) * 1024 * 1024,
+      pageExtensions: (readList(env.WIKI_PAGE_EXTENSIONS) ?? ['md', 'html', 'txt'])
+        .map(ext => ext.replace(/^\./, '').toLowerCase())
     }
   }
 }
@@ -121,6 +132,8 @@ export function describeConfig (config: Config): Record<string, unknown> {
     debounceSeconds: config.index.debounceSeconds,
     reconcileMinutes: config.index.reconcileMinutes,
     hasWikiApiKey: config.index.wikiApiKey.length > 0,
+    maxDocumentMb: Math.round(config.index.maxDocumentBytes / (1024 * 1024)),
+    pageExtensions: config.index.pageExtensions,
     wikiPublicUrl: config.wikiPublicUrl,
     mcpRateLimitPerMinute: config.mcp.rateLimitPerMinute
   }

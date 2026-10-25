@@ -28,6 +28,21 @@ export interface WikiPageSource extends WikiPageSummary {
   render: string
 }
 
+/** One uploaded file, with the path Wiki.js serves it at. */
+export interface WikiAsset {
+  id: number
+  /** Folder slugs and the file name: "sops/manual.pdf". No locale. */
+  path: string
+  fileName: string
+  /** Lower case, with the dot. */
+  ext: string
+  /** Wiki.js's own split: "image" or "binary". */
+  kind: string
+  mime: string
+  fileSize: number
+  updatedAt: string
+}
+
 const LIST_QUERY = `
   query AiIndexList {
     pages {
@@ -47,6 +62,34 @@ const SINGLE_QUERY = `
     }
   }
 `
+
+/**
+ * Both halves of one folder in a single request. `folder` and `author` are
+ * never selected: the resolver does no eager loading, so they are always
+ * null.
+ */
+const ASSETS_QUERY = `
+  query AiIndexAssets($folderId: Int!) {
+    assets {
+      list(folderId: $folderId, kind: ALL) {
+        id filename ext kind mime fileSize updatedAt
+      }
+      folders(parentFolderId: $folderId) {
+        id slug
+      }
+    }
+  }
+`
+
+interface AssetItem {
+  id: number
+  filename: string
+  ext: string | null
+  kind: string | null
+  mime: string | null
+  fileSize: number | null
+  updatedAt: string
+}
 
 export class WikiAdminClient {
   readonly #baseUrl: string
@@ -77,6 +120,85 @@ export class WikiAdminClient {
       }
       throw err
     }
+  }
+
+  /**
+   * Every uploaded file, by walking the folder tree.
+   *
+   * Wiki.js has no query that returns all assets: `assets.list` takes one
+   * folder, `assets.folders` takes one parent, and folder 0 is the root.
+   * `AssetItem.folder` always resolves to null, so the path is built from
+   * the walk itself. `metadata` is never selected: it is declared String
+   * and resolved as an object, the same trap as `Page.toc`.
+   */
+  async listAssets (): Promise<WikiAsset[]> {
+    const found: WikiAsset[] = []
+    const queue: Array<{ id: number, path: string }> = [{ id: 0, path: '' }]
+
+    while (queue.length > 0) {
+      const folder = queue.shift() as { id: number, path: string }
+      const data = await this.#graphql<{
+        assets: {
+          list: Array<AssetItem | null> | null
+          folders: Array<{ id: number, slug: string } | null> | null
+        }
+      }>(ASSETS_QUERY, { folderId: folder.id })
+
+      for (const item of data.assets.list ?? []) {
+        // A row with no fileSize comes back null, because Wiki.js declares
+        // that column non-null when it is not.
+        if (!item) { continue }
+        found.push({
+          id: item.id,
+          path: folder.path ? `${folder.path}/${item.filename}` : item.filename,
+          fileName: item.filename,
+          ext: (item.ext ?? '').toLowerCase(),
+          kind: (item.kind ?? '').toLowerCase(),
+          mime: item.mime ?? '',
+          fileSize: item.fileSize ?? 0,
+          updatedAt: item.updatedAt
+        })
+      }
+
+      for (const child of data.assets.folders ?? []) {
+        if (!child) { continue }
+        queue.push({ id: child.id, path: folder.path ? `${folder.path}/${child.slug}` : child.slug })
+      }
+    }
+
+    return found
+  }
+
+  /**
+   * The file itself, as the wiki serves it.
+   *
+   * Assets sit at the site root with no locale segment, and the only route
+   * that serves them is the catch-all page route, so this is a plain GET
+   * with the indexer's key.
+   */
+  async downloadAsset (path: string): Promise<Buffer> {
+    const clean = path.replace(/^\/+/, '')
+    let response: Response
+    try {
+      response = await fetch(`${this.#baseUrl}/${encodeURI(clean)}`, {
+        headers: { authorization: `Bearer ${this.#apiKey}` },
+        redirect: 'manual',
+        signal: AbortSignal.timeout(this.#timeoutMs * 3)
+      })
+    } catch (err) {
+      const reason = err instanceof Error && err.name === 'TimeoutError' ? 'timed out' : 'is unreachable'
+      throw new WikiError(503, `the wiki ${reason}`)
+    }
+
+    if (!response.ok) {
+      throw new WikiError(response.status, `the file could not be downloaded (${response.status})`)
+    }
+    const type = response.headers.get('content-type') ?? ''
+    if (type.startsWith('text/html')) {
+      // The catch-all route answered as a page, not as a file.
+      throw new WikiError(404, 'the wiki served a page, not a file, at that path')
+    }
+    return Buffer.from(await response.arrayBuffer())
   }
 
   async #graphql<T> (query: string, variables: Record<string, unknown>): Promise<T> {

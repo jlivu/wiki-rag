@@ -3,19 +3,24 @@
  */
 import type { Pool } from 'pg'
 
-import { readPage, removePage, replacePage, touchPage, existingEmbeddings } from '../index-db/store.js'
+import {
+  existingEmbeddings, readPage, removePage, replaceDocumentLinks, replacePage, touchPage
+} from '../index-db/store.js'
 import type { QueuedJob } from '../index-db/queue.js'
 import { htmlToMarkdown } from '../wiki/markdown.js'
 import type { WikiAdminClient, WikiPageSource } from '../wiki/admin-client.js'
 
 import { chunkMarkdown, estimateTokens, hash } from './chunker.js'
 import { toVectorLiteral, type Embedder } from './embeddings.js'
+import { assetLinksFrom, type LinkScanOptions } from './links.js'
 import { tocFromRender } from './toc.js'
 
 export interface JobOutcome {
   action: 'indexed' | 'skipped' | 'removed'
   chunks?: number
   embedded?: number
+  /** How many uploaded files this page links to. */
+  links?: number
   reason?: string
 }
 
@@ -23,30 +28,31 @@ export async function runJob (
   db: Pool,
   wiki: WikiAdminClient,
   embedder: Embedder,
-  job: QueuedJob
+  job: QueuedJob,
+  links: LinkScanOptions
 ): Promise<JobOutcome> {
   if (job.event === 'deleted') {
-    await removePage(db, job.pageId)
+    await removePage(db, job.entityId)
     return { action: 'removed', reason: 'deleted' }
   }
 
-  const page = await wiki.fetchPage(job.pageId)
+  const page = await wiki.fetchPage(job.entityId)
   if (!page) {
-    await removePage(db, job.pageId)
+    await removePage(db, job.entityId)
     return { action: 'removed', reason: 'gone' }
   }
   if (!page.isPublished) {
     // An unpublished page is invisible to readers, so it leaves the index.
-    await removePage(db, job.pageId)
+    await removePage(db, job.entityId)
     return { action: 'removed', reason: 'unpublished' }
   }
 
   const markdown = toMarkdown(page)
   const sourceHash = hash(markdown)
-  const indexed = await readPage(db, job.pageId)
+  const indexed = await readPage(db, job.entityId)
 
   if (indexed && indexed.sourceHash === sourceHash && indexed.path === page.path && indexed.locale === page.locale) {
-    await touchPage(db, job.pageId, page.updatedAt)
+    await touchPage(db, job.entityId, page.updatedAt)
     return { action: 'skipped', reason: 'unchanged' }
   }
 
@@ -56,7 +62,7 @@ export async function runJob (
 
   // A chunk whose text is unchanged keeps the vector it already has; a
   // rename or an edit elsewhere on the page costs nothing to embed.
-  const reusable = await existingEmbeddings(db, job.pageId)
+  const reusable = await existingEmbeddings(db, job.entityId)
   const fresh = chunks.filter(chunk => !reusable.has(chunk.contentHash))
   const vectors = await embedder.embed(fresh.map(chunk => chunk.text))
 
@@ -82,7 +88,12 @@ export async function runJob (
     updatedAt: page.updatedAt
   }, rows, embedder.model)
 
-  return { action: 'indexed', chunks: rows.length, embedded: fresh.length }
+  // Which files this page points at, for the "Linked from" line a document
+  // source carries. The page has to exist in the index first.
+  const linked = assetLinksFrom(page.render, links)
+  await replaceDocumentLinks(db, page.id, linked)
+
+  return { action: 'indexed', chunks: rows.length, embedded: fresh.length, ...(linked.length > 0 ? { links: linked.length } : {}) }
 }
 
 /**

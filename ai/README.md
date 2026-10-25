@@ -119,6 +119,8 @@ with no values; copy what you need.
 | `INDEX_DEBOUNCE_SECONDS` | `10`                          | Rapid saves of one page collapse into a single job. |
 | `RECONCILE_MINUTES` | `30`                               | How often the index is compared with the page list. |
 | `INDEX_DB_URL`      | `postgres://wiki_ai:wiki_ai@ai-db:5432/wiki_ai` | The index database. |
+| `MAX_DOCUMENT_MB`   | `25`                               | Uploaded files larger than this are listed as skipped and never downloaded. |
+| `WIKI_PAGE_EXTENSIONS` | `md,html,txt`                   | Wiki.js's own `pageExtensions`. A file with one of these cannot be served as a file, so it is skipped. |
 
 Restart the service after editing `ai/.env` — `docker compose … up -d ai`
 (`docker restart wiki-ai` does not reread the file).
@@ -153,8 +155,10 @@ the model has to reply with what it has.
 Two tools read the wiki (`src/wiki/tools.ts`):
 
 - `search_wiki(query, locale?, limit?)` — the hybrid index search, returning
-  titles, paths, the matching section and its link.
+  titles, paths, the matching section or place in a file, and its link.
 - `get_page(path, locale?)` — one page as Markdown.
+- `get_document(path)` — one uploaded file as text, each part labelled with
+  where in the file it came from.
 
 Every result from either carries a short source id — `S1`, `S2` — for the
 model to cite. See *Citing sources* below.
@@ -194,6 +198,12 @@ pages it read are listed instead, so an answer drawn from the wiki never
 ends without its sources. An answer that found nothing relevant — nothing
 cited, nothing read — shows no card at all.
 
+A source that is an uploaded file carries more: the file name, its type,
+where in the file the answer came from, and the pages that link to it —
+only the ones this reader may open, since a title leaks as much as a
+snippet does. Its link opens the file itself, and a PDF opens at the cited
+page (`#page=4`).
+
 In the panel, `cite:1` is resolved against that card: entry 1 is marker [1].
 The link, the title and the section come from the card, never from the href,
 and a marker with no entry behind it (the card has not arrived yet) stays a
@@ -231,17 +241,26 @@ pages keep their error codes in tables.
 ## The page index
 
 `ai-db` is a Postgres with pgvector, on the Docker network only, holding a
-copy of every published page split into chunks with their embeddings. The
-schema is created by migrations that run at startup
-(`src/index-db/migrate.ts`):
+copy of every published page and every uploaded document, split into chunks
+with their embeddings. The schema is created by migrations that run at
+startup (`src/index-db/migrate.ts`):
 
 - `index_pages` — one row per page: path, locale, title, content type, a hash
   of the source and Wiki.js's `updatedAt`.
-- `index_chunks` — the page id, the heading path, Wiki.js's anchor for that
-  heading, the chunk text, a content hash, the embedding, the model that
-  produced it, and `fts`, a generated `tsvector`. An **HNSW** index covers the vectors and a **GIN** index covers
-  `fts`.
-- `index_queue` — one row per page waiting to be indexed.
+- `index_documents` — one row per uploaded file: path, file name, type, size,
+  Wiki.js's `updatedAt`, a hash of the bytes, and a status with a reason. A
+  file that cannot be indexed is recorded too, so the reason is visible and
+  reconciliation does not keep retrying it.
+- `index_chunks` — the page **or** the document it belongs to (exactly one of
+  the two, by a check constraint), the heading path, Wiki.js's anchor or a
+  PDF page fragment, where in a document it came from, the chunk text, a
+  content hash, the embedding, the model that produced it, and `fts`, a
+  generated `tsvector`. An **HNSW** index covers the vectors and a **GIN**
+  index covers `fts`.
+- `index_document_links` — which pages link to which file, filled in as each
+  page is indexed.
+- `index_queue` — one row per page or file waiting to be indexed, keyed by
+  kind and id: a page and an asset can share a number.
 - `index_meta` — the embedding model and its width.
 
 ### Embeddings
@@ -288,6 +307,71 @@ docker logs wiki-ai | grep -E 'indexed a page|reconciled'
 docker exec wiki-ai-db psql -U wiki_ai -d wiki_ai -c 'SELECT * FROM index_pages'
 ```
 
+### Uploaded documents
+
+Files uploaded through Wiki.js's asset manager are indexed alongside pages,
+so one search covers both and an answer can cite the file itself.
+
+**What is indexed.** PDF, DOCX, XLSX, PPTX and CSV. Everything else is
+recorded with the reason it was left out, which is also logged
+(`document not indexed`): an image, a file larger than `MAX_DOCUMENT_MB`
+(never downloaded — the size comes from the listing), a legacy `.doc`,
+`.xls` or `.ppt`, an unsupported type, or a PDF that is a scan with no text
+layer, which is kept as `needs_ocr` rather than treated as a failure.
+
+A folder whose name is one or two characters is the other trap: Wiki.js
+reads the first segment of a URL as a locale, so a file in `it/` or `hr/`
+is looked up without it — it 404s, or a different file of the same name at
+the root is served in its place. Such a file is recorded as skipped with
+that reason rather than indexed from the wrong bytes.
+
+Plain text and Markdown are the awkward case. Wiki.js's `pageExtensions`
+setting makes it serve `/notes.txt` as a *page*, so an uploaded `.txt`,
+`.md` or `.html` cannot be downloaded at its own URL — and a reader's
+access to it cannot be checked there either. Such a file is recorded as
+skipped with that reason rather than indexed and shown to people who may
+not be allowed to see it. `WIKI_PAGE_EXTENSIONS` has to match the wiki's
+own setting.
+
+**Where the text comes from.** Each format is read with its structure
+intact, because a citation has to name a place the reader can go back to:
+
+| Format | Split into | A citation reads |
+| ------ | ---------- | ---------------- |
+| PDF (`unpdf`) | pages | `Page 4`, and the link opens there with `#page=4` |
+| DOCX (`mammoth`, then the service's Turndown) | headings | `Section "Pricing"` |
+| PPTX (`fflate` + `fast-xml-parser`, no library) | slides, in `p:sldIdLst` order | `Slide 7 "Findings"` |
+| XLSX (`read-excel-file`) | sheets, then rows | `Sheet "Budget" rows 12–40` |
+| CSV (`csv-parse`) | rows | `Rows 12–40` |
+
+Chunking follows the page rules — roughly 300–600 tokens, never crossing
+from one place in the file into another — and every chunk is prefixed with
+the file name and that place. A sheet's header row is repeated at the top
+of every chunk cut from it, so a row still has its column names.
+
+**How a file is fetched.** Wiki.js's storage hooks (`assetUploaded`,
+`assetRenamed`, `assetDeleted`) post the asset id to
+`/internal/asset-event`; the service then lists and downloads the file
+itself with `WIKI_API_KEY`, rather than being handed the bytes. Listing
+means walking the folder tree — `assets.list` takes one folder and there is
+no query for all of them — so the walk is cached for a few seconds and
+shared by a burst of uploads. Reconciliation compares that walk with
+`index_documents` by path, size and date, so a file that arrived while the
+service was down is picked up anyway.
+
+**Which pages link to a file.** As each page is indexed, its rendered HTML
+is scanned for links to assets and the pairs are written to
+`index_document_links`. Wiki.js has no table for this — `pageLinks` holds
+page-to-page links only. A document source then shows "Linked from", with
+the pages the asking reader is allowed to open and no others.
+
+**Permissions.** Exactly as for a page, and with the reader's own token: a
+file is checked with a `HEAD` of its URL, which runs Wiki.js's `read:assets`
+check against the path (`server/controllers/common.js`) and answers 403 when
+it refuses. The indexer's download has already warmed the wiki's cache, so
+the check is cheap. `get_document` makes the same check before returning a
+word.
+
 ### Routes for the wiki, not for readers
 
 `/internal/*` sits **outside** the `/ai` prefix, and the proxy forwards only
@@ -298,6 +382,7 @@ Wiki.js and 404s, while `wiki-app` can call
 | Route | Called by |
 | ----- | --------- |
 | `POST /internal/page-event` | the storage module, on every page change |
+| `POST /internal/asset-event` | the storage module, on every upload, rename or delete |
 | `POST /internal/reconcile`  | its scheduled sync, and "Reconcile now" |
 | `POST /internal/reindex`    | "Re-index everything" |
 | `GET  /internal/status`     | whoever wants to see queue depth and counts |
@@ -356,14 +441,17 @@ TypeScript SDK (`@modelcontextprotocol/sdk`). It is reachable through the
 proxy, so an agent on this Mac connects to
 `http://127.0.0.1:3080/ai/mcp`.
 
-Four tools, described for an agent rather than a person. Each result carries
-the page's URL — a search hit links straight to the section that matched — so
-an agent can cite what it used.
+Five tools, described for an agent rather than a person. Each result carries
+the page's URL — a search hit links straight to the section that matched, or
+to the page of a PDF — so an agent can cite what it used. Search covers
+uploaded files as well as pages; a file result is marked `"kind":
+"document"` and says where in the file the match is.
 
 | Tool | What it does |
 | ---- | ------------ |
 | `search_wiki(query, limit?)` | The same hybrid index search the panel uses, with snippets. |
 | `get_page(path, locale?)` | One page as Markdown, with title, path, URL and last-updated date; a very long page is cut and says so. |
+| `get_document(path)` | One uploaded file as text, each part headed with where in the file it came from. |
 | `list_pages(prefix?, limit?)` | Titles and paths for browsing. |
 | `create_draft_page(title, path, content, description?)` | Files an unpublished page under `drafts/`, tagged `ai-draft`, for a person to review. |
 

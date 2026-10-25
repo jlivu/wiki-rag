@@ -26,15 +26,25 @@ export interface PageLink {
   locale?: string
 }
 
-/** Where an answer came from. */
+/** Where an answer came from: a wiki page, or an uploaded file. */
 export interface Source extends PageLink {
   snippet: string
   /** ISO 8601, e.g. 2026-09-14T04:12:00.000Z. */
   updatedAt?: string
   /** Heading path of the section the answer came from. */
   section?: string
-  /** Wiki.js's anchor for that section, e.g. "#troubleshooting". */
+  /** Wiki.js's anchor for that section, or "#page=4" in a PDF. */
   anchor?: string
+  /** "document" for an uploaded file; a page otherwise. */
+  kind?: 'page' | 'document'
+  /** Documents: the file's own name, e.g. "generator-manual.pdf". */
+  fileName?: string
+  /** Documents: pdf, docx, xlsx, pptx or csv — which icon to draw. */
+  fileType?: string
+  /** Documents: where in the file, e.g. "Page 4" or "Slide 7". */
+  location?: string
+  /** Documents: the pages that link to the file. */
+  linkedFrom?: PageLink[]
 }
 
 export interface SourcesArgs {
@@ -132,7 +142,16 @@ export const PANEL_TOOL_SCHEMAS: Record<PanelToolName, Record<string, unknown>> 
             snippet: { type: 'string', description: 'A sentence or two from the page showing why it is relevant. Quote the page; do not invent it.' },
             updatedAt: { type: 'string', description: 'When the page was last updated, ISO 8601, if known.' },
             section: { type: 'string', description: 'Heading path of the section used, e.g. "Procedure › 5. Verify".' },
-            anchor: { type: 'string', description: 'Wiki.js anchor for that section, e.g. "#troubleshooting".' }
+            anchor: { type: 'string', description: 'Wiki.js anchor for that section, e.g. "#troubleshooting", or "#page=4" in a PDF.' },
+            kind: { type: 'string', enum: ['page', 'document'], description: 'A wiki page, or an uploaded file.' },
+            fileName: { type: 'string', description: 'For a file: its name, e.g. "generator-manual.pdf".' },
+            fileType: { type: 'string', description: 'For a file: pdf, docx, xlsx, pptx or csv.' },
+            location: { type: 'string', description: 'For a file: where in it, e.g. "Page 4" or "Slide 7".' },
+            linkedFrom: {
+              type: 'array',
+              description: 'For a file: the wiki pages that link to it.',
+              items: { type: 'object', properties: PAGE_LINK_PROPERTIES, required: ['title', 'path'], additionalProperties: false }
+            }
           },
           required: ['title', 'path', 'snippet'],
           additionalProperties: false
@@ -256,12 +275,25 @@ function readSources (value: unknown): SourcesArgs {
 
 function readSource (value: unknown, path: string): Source {
   const item = obj(value, path)
+  const rawKind = optStr(item.kind, `${path}.kind`)
+  if (rawKind !== undefined && rawKind !== 'page' && rawKind !== 'document') {
+    throw new Error(`${path}.kind has to be "page" or "document"`)
+  }
+  const kind: 'page' | 'document' | undefined = rawKind
+  const linkedFrom = item.linkedFrom === undefined
+    ? undefined
+    : list(item.linkedFrom, `${path}.linkedFrom`, (entry, at) => readPageLink(obj(entry, at), at), 0)
   return {
     ...readPageLink(item, path),
     snippet: str(item.snippet, `${path}.snippet`),
     ...optional('updatedAt', optStr(item.updatedAt, `${path}.updatedAt`)),
     ...optional('section', optStr(item.section, `${path}.section`)),
-    ...optional('anchor', optStr(item.anchor, `${path}.anchor`))
+    ...optional('anchor', optStr(item.anchor, `${path}.anchor`)),
+    ...optional('kind', kind),
+    ...optional('fileName', optStr(item.fileName, `${path}.fileName`)),
+    ...optional('fileType', optStr(item.fileType, `${path}.fileType`)),
+    ...optional('location', optStr(item.location, `${path}.location`)),
+    ...(linkedFrom === undefined ? {} : { linkedFrom })
   }
 }
 

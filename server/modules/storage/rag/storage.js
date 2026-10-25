@@ -5,12 +5,15 @@ const _ = require('lodash')
 /**
  * AI ASSISTANT INDEX
  *
- * Tells the AI service which page changed, so it can keep its search index
- * current. It stores nothing itself.
+ * Tells the AI service which page or uploaded file changed, so it can keep
+ * its search index current. It stores nothing itself.
  *
- * Saving a page must never fail or slow down because of the assistant, so
- * every notification is sent without waiting for the reply, bounded by a
- * short timeout, and every error is logged rather than thrown.
+ * Saving a page or uploading a file must never fail or slow down because of
+ * the assistant, so every notification is sent without waiting for the
+ * reply, bounded by a short timeout, and every error is logged rather than
+ * thrown. That matters more here than it looks: WIKI.models.storage
+ * rethrows whatever an asset hook throws, and a throw from one target stops
+ * the others being told at all.
  */
 module.exports = {
   async activated() { },
@@ -48,11 +51,24 @@ module.exports = {
     })
   },
 
-  // Assets are not indexed, but these have to exist: WIKI.models.storage
-  // calls them on every upload and rethrows anything that goes wrong.
-  async assetUploaded() { },
-  async assetDeleted() { },
-  async assetRenamed() { },
+  /*
+   * Uploaded files. The AI service fetches the file itself with the
+   * indexer's key rather than being handed the bytes, so these only say
+   * which asset changed.
+   */
+
+  async assetUploaded(asset) {
+    this.notifyAssetEvent('uploaded', asset)
+  },
+
+  async assetDeleted(asset) {
+    this.notifyAssetEvent('deleted', asset)
+  },
+
+  async assetRenamed(asset) {
+    // `path` is where the file was; `destinationPath` is where it is now.
+    this.notifyAssetEvent('renamed', asset, { path: _.get(asset, 'destinationPath', null) })
+  },
 
   async getLocalLocation() {
     return null
@@ -93,6 +109,23 @@ module.exports = {
     }
     // Deliberately not awaited.
     this.notify('/internal/page-event', body, { wait: false })
+  },
+
+  /**
+   * Fire an asset event and return at once.
+   */
+  notifyAssetEvent(event, asset, override = {}) {
+    const body = {
+      event,
+      id: _.get(asset, 'id', null),
+      path: _.get(override, 'path', null) || _.get(asset, 'path', null)
+    }
+    if (!body.id) {
+      WIKI.logger.warn(`(STORAGE/RAG) Skipping asset ${event}: the asset has no id.`)
+      return
+    }
+    // Deliberately not awaited.
+    this.notify('/internal/asset-event', body, { wait: false })
   },
 
   /**

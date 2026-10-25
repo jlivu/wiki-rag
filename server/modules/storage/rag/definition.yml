@@ -1,6 +1,6 @@
 key: rag
 title: AI Assistant Index
-description: Tells the AI assistant when a page changes, so its search index stays current. Sends only the page id, path and locale; it never writes files anywhere.
+description: Tells the AI assistant when a page or an uploaded file changes, so its search index stays current. Sends only the id and path; it never writes files anywhere.
 author: doft.gov.vu
 logo: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0OCA0OCI+PGNpcmNsZSBjeD0iMjQiIGN5PSIyNCIgcj0iMjIiIGZpbGw9IiMxOTc2ZDIiLz48ZyBmaWxsPSJub25lIiBzdHJva2U9IiNmZmYiIHN0cm9rZS13aWR0aD0iMi40IiBzdHJva2UtbGluZWNhcD0icm91bmQiPjxlbGxpcHNlIGN4PSIyNCIgY3k9IjE1IiByeD0iMTEiIHJ5PSI1Ii8+PHBhdGggZD0iTTEzIDE1djE4YzAgMi44IDQuOSA1IDExIDVzMTEtMi4yIDExLTVWMTUiLz48cGF0aCBkPSJNMTMgMjRjMCAyLjggNC45IDUgMTEgNXMxMS0yLjIgMTEtNSIvPjwvZz48L3N2Zz4=
 website: https://github.com/requarks/wiki

@@ -26,6 +26,10 @@ const MAX_TOKENS = 600
 const MIN_CHARS = MIN_TOKENS * CHARS_PER_TOKEN
 const MAX_CHARS = MAX_TOKENS * CHARS_PER_TOKEN
 
+/** The same sizes for uploaded documents; see documents/chunk.ts. */
+export const CHUNK_MIN_CHARS = MIN_CHARS
+export const CHUNK_MAX_CHARS = MAX_CHARS
+
 export interface Chunk {
   ordinal: number
   headingPath: string

@@ -33,12 +33,21 @@ export function wikiHref (path: string, locale: string | undefined, fallbackLoca
   return `/${locale || fallbackLocale}/${trimmed}`
 }
 
-/** The address of a source, including the section the answer came from. */
+/**
+ * The address of a source, including the place the answer came from: the
+ * section of a page, or the page of a PDF.
+ *
+ * An uploaded file is served from the site root with no locale segment —
+ * Wiki.js strips one from an asset URL — so only a page gets one.
+ */
 export function sourceHref (
-  source: { path: string, locale?: string, anchor?: string },
+  source: { path: string, locale?: string, anchor?: string, kind?: 'page' | 'document' },
   fallbackLocale: string
 ): string {
   const raw = source.anchor?.trim() ?? ''
   const anchor = raw.length === 0 ? '' : (raw.startsWith('#') ? raw : `#${raw}`)
-  return `${wikiHref(source.path, source.locale, fallbackLocale)}${anchor}`
+  const path = source.kind === 'document'
+    ? `/${source.path.replace(/^\/+/, '')}`
+    : wikiHref(source.path, source.locale, fallbackLocale)
+  return `${path}${anchor}`
 }

@@ -10,8 +10,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import {
-  createDraftPage, getPage, listPages, searchWiki,
-  type McpToolContext, type ToolResult
+  createDraftPage,
+  getDocument,
+  getPage,
+  listPages,
+  searchWiki,
+  type McpToolContext,
+  type ToolResult
 } from './tools.js'
 
 export const MCP_SERVER_NAME = 'wiki'
@@ -69,7 +74,10 @@ export function buildMcpServer (
       'Searches the words on the page as well as its title, so a plain question works as well as',
       'keywords. Use this first, before answering anything the wiki might cover; search again with',
       'different wording if nothing comes back. Results carry a url you can cite. The snippets are',
-      'extracts — read a page with get_page before relying on it.'
+      'extracts — read a page with get_page before relying on it.',
+      'Uploaded files are searched too: a result with "kind": "document" is a PDF, Word document,',
+      'spreadsheet or presentation, and its "location" says where in the file the match is. Read one',
+      'with get_document, not get_page.'
     ].join(' '),
     inputSchema: {
       query: z.string().min(1).describe('What to look for. A question or a few keywords.'),
@@ -91,6 +99,20 @@ export function buildMcpServer (
     },
     annotations: { readOnlyHint: true, openWorldHint: false }
   }, run('get_page', args => getPage(ctx, args)))
+
+  server.registerTool('get_document', {
+    title: 'Read an uploaded file',
+    description: [
+      'Read the text of one uploaded file — PDF, Word, Excel, PowerPoint or CSV — by the path that',
+      'search_wiki returned for a result whose "kind" is "document". The text comes back in order,',
+      'each part labelled with where it is in the file ("Page 4", "Slide 7", \'Sheet "Budget" rows',
+      '12-40\'), so a citation can name the place. A PDF url opens at the cited page with #page=N.'
+    ].join(' '),
+    inputSchema: {
+      path: z.string().min(1).describe('File path as search_wiki returned it, e.g. "sops/manual.pdf".')
+    },
+    annotations: { readOnlyHint: true, openWorldHint: false }
+  }, run('get_document', args => getDocument(ctx, args)))
 
   server.registerTool('list_pages', {
     title: 'List wiki pages',

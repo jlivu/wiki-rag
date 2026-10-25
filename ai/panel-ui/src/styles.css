@@ -414,6 +414,38 @@ pre,
   color: var(--primary);
 }
 
+/* An uploaded file: the entry holds several links, so it is not one. */
+.src-doc { cursor: default; }
+.src-doc:hover { background-color: transparent; }
+
+.src-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  text-decoration: none;
+}
+
+.src-file:hover { text-decoration: underline; }
+
+.file-icon {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.src-linked {
+  display: block;
+  margin-top: 5px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.src-linked a {
+  color: var(--primary);
+  text-decoration: none;
+}
+
+.src-linked a:hover { text-decoration: underline; }
+
 .src-section {
   display: block;
   margin-top: 1px;

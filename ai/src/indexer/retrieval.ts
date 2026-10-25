@@ -1,44 +1,71 @@
 /**
  * What search_wiki asks when the index is available.
  *
- * Chunks are fused by reciprocal rank fusion, grouped back into pages, and
- * then — before anything reaches the model — checked page by page against
- * Wiki.js as the reader who asked. The index was built with the admin key,
- * so it holds pages some readers may not see.
+ * Chunks are fused by reciprocal rank fusion, grouped back into the page or
+ * the file they came from, and then — before anything reaches the model —
+ * checked one by one against Wiki.js as the reader who asked. The index was
+ * built with the admin key, so it holds things some readers may not see.
+ *
+ * Pages and uploaded documents are ranked against each other in one list.
+ * A page is checked by fetching it as the reader; a file by asking Wiki.js
+ * for it as the reader, which applies `read:assets` to its path.
  */
 import type { FastifyBaseLogger } from 'fastify'
 import type { Pool } from 'pg'
 
 import { chunkCount, searchChunks, type ChunkHit } from '../index-db/search.js'
-import type { PermissionCache } from '../wiki/permission-cache.js'
+import { linkingPages, type LinkingPage } from '../index-db/store.js'
+import type { PermissionCache, ResourceKind } from '../wiki/permission-cache.js'
 import { WikiClient } from '../wiki/client.js'
 
 import { toVectorLiteral, type Embedder } from './embeddings.js'
 
 /** Candidates taken from each of the two searches before fusion. */
 const PER_LIST = 30
-/** At most two chunks of one page are quoted back. */
+/** At most two chunks of one page or file are quoted back. */
 const SNIPPETS_PER_PAGE = 2
 const SNIPPET_CHARS = 420
 /** Permission checks cost a request each, so cap how many are attempted. */
 const MAX_CHECKS = 24
+/** Pages named under "Linked from", at most, and only ones the reader may see. */
+const MAX_LINKS = 3
 
-export interface RetrievedPage {
+interface RetrievedBase {
   title: string
   path: string
-  locale: string
-  /** The heading path of the best chunk, e.g. "Procedure › 5. Verify". */
-  heading: string
-  /** Wiki.js's anchor for that section, e.g. "#troubleshooting". */
-  anchor: string
   snippet: string
   updatedAt: string
   score: number
+  /** Wiki.js's section anchor, or "#page=4" in a PDF. */
+  anchor: string
 }
 
+export interface RetrievedPage extends RetrievedBase {
+  kind: 'page'
+  locale: string
+  /** The heading path of the best chunk, e.g. "Procedure › 5. Verify". */
+  heading: string
+}
+
+export interface RetrievedDocument extends RetrievedBase {
+  kind: 'document'
+  id: number
+  fileName: string
+  /** pdf, docx, xlsx, pptx, csv. */
+  docType: string
+  mime: string
+  fileSize: number
+  /** Where in the file: "Page 4", "Sheet \"Budget\" rows 12–40". */
+  location: string
+  /** The pages that link to this file, as far as the reader may see them. */
+  linkedFrom: Array<{ title: string, path: string, locale: string }>
+}
+
+export type RetrievedItem = RetrievedPage | RetrievedDocument
+
 export interface RetrievalResult {
-  results: RetrievedPage[]
-  /** How many pages the reader was not allowed to see. */
+  results: RetrievedItem[]
+  /** How many pages or files the reader was not allowed to see. */
   filtered: number
   checked: number
 }
@@ -72,73 +99,142 @@ export class Retriever {
     if (!vector) { throw new Error('the query could not be embedded') }
 
     const hits = await searchChunks(this.#db, toVectorLiteral(vector), query, locale, PER_LIST)
-    const pages = groupByPage(hits)
+    const candidates = group(hits)
 
     // More candidates than will be returned, so enough survive the filter.
-    const results: RetrievedPage[] = []
+    const results: RetrievedItem[] = []
     let filtered = 0
     let checked = 0
 
-    for (const page of pages) {
+    for (const item of candidates) {
       if (results.length >= limit || checked >= MAX_CHECKS) { break }
       checked += 1
-      if (await this.#canRead(reader, readerToken, page.path, page.locale)) {
-        results.push(page)
-      } else {
+      if (!await this.#canRead(reader, readerToken, item)) {
         filtered += 1
+        continue
       }
+      results.push(
+        item.kind === 'document'
+          ? { ...item, linkedFrom: await this.#linkedFrom(reader, readerToken, item.path) }
+          : item
+      )
     }
 
     return { results, filtered, checked }
   }
 
-  /** The same request get_page makes, so the answer is the same answer. */
-  async #canRead (
-    reader: WikiClient,
-    token: string | null,
-    path: string,
-    locale: string
-  ): Promise<boolean> {
-    const cached = this.#permissions.get(token, locale, path)
+  /** Whether this reader may open one candidate, page or file. */
+  async #canRead (reader: WikiClient, token: string | null, item: RetrievedItem): Promise<boolean> {
+    const kind: ResourceKind = item.kind
+    const locale = item.kind === 'page' ? item.locale : ''
+    const cached = this.#permissions.get(token, kind, locale, item.path)
     if (cached !== undefined) { return cached }
 
     let readable = false
-    try {
-      await reader.fetchPage(path, locale)
-      readable = true
-    } catch {
-      readable = false
+    if (item.kind === 'page') {
+      // The same request get_page makes, so the answer is the same answer.
+      try {
+        await reader.fetchPage(item.path, item.locale)
+        readable = true
+      } catch {
+        readable = false
+      }
+    } else {
+      readable = await reader.canReadAsset(item.path)
     }
-    this.#permissions.set(token, locale, path, readable)
+
+    this.#permissions.set(token, kind, locale, item.path, readable)
     return readable
+  }
+
+  /**
+   * The pages that link to a file — but only the ones this reader may
+   * open, since a title is as much a leak as a snippet.
+   */
+  async #linkedFrom (
+    reader: WikiClient,
+    token: string | null,
+    assetPath: string
+  ): Promise<Array<{ title: string, path: string, locale: string }>> {
+    let pages: LinkingPage[]
+    try {
+      pages = await linkingPages(this.#db, assetPath, MAX_LINKS + 2)
+    } catch (err) {
+      this.#log.warn({ err, assetPath }, 'the pages linking to a file could not be read')
+      return []
+    }
+
+    const visible: Array<{ title: string, path: string, locale: string }> = []
+    for (const page of pages) {
+      if (visible.length >= MAX_LINKS) { break }
+      const item: RetrievedPage = {
+        kind: 'page',
+        title: page.title,
+        path: page.path,
+        locale: page.locale,
+        heading: '',
+        anchor: '',
+        snippet: '',
+        updatedAt: '',
+        score: 0
+      }
+      if (await this.#canRead(reader, token, item)) {
+        visible.push({ title: page.title || page.path, path: page.path, locale: page.locale })
+      }
+    }
+    return visible
   }
 }
 
-/** One entry per page, carrying its best chunks. */
-function groupByPage (hits: ChunkHit[]): RetrievedPage[] {
-  const byPage = new Map<number, { hits: ChunkHit[], score: number }>()
+/** One entry per page or file, carrying its best chunks. */
+function group (hits: ChunkHit[]): RetrievedItem[] {
+  const byOwner = new Map<string, { hits: ChunkHit[], score: number }>()
   for (const hit of hits) {
-    const entry = byPage.get(hit.pageId) ?? { hits: [], score: 0 }
+    const key = `${hit.kind}:${hit.ownerId}`
+    const entry = byOwner.get(key) ?? { hits: [], score: 0 }
     entry.hits.push(hit)
-    // A page is worth the sum of its matching chunks, so a page that
+    // Something is worth the sum of its matching chunks, so a page that
     // matches in two places outranks one that matches in one.
     entry.score += hit.score
-    byPage.set(hit.pageId, entry)
+    byOwner.set(key, entry)
   }
 
-  return [...byPage.values()]
+  return [...byOwner.values()]
     .map(entry => {
       const best = entry.hits.slice(0, SNIPPETS_PER_PAGE)
       const first = best[0] as ChunkHit
+      const snippet = best.map(hit => snippetOf(hit)).join('\n\n…\n\n')
+      const score = Number(entry.score.toFixed(6))
+
+      if (first.kind === 'document') {
+        return {
+          kind: 'document' as const,
+          id: first.ownerId,
+          title: first.fileName,
+          fileName: first.fileName,
+          path: first.path,
+          docType: first.docType,
+          mime: first.mime,
+          fileSize: first.fileSize,
+          location: first.location,
+          anchor: first.anchor,
+          snippet,
+          updatedAt: first.updatedAt,
+          score,
+          linkedFrom: []
+        }
+      }
+
       return {
+        kind: 'page' as const,
         title: first.title,
         path: first.path,
         locale: first.locale,
         heading: first.headingPath,
         anchor: first.anchor,
-        snippet: best.map(hit => snippetOf(hit)).join('\n\n…\n\n'),
+        snippet,
         updatedAt: first.updatedAt,
-        score: Number(entry.score.toFixed(6))
+        score
       }
     })
     .sort((a, b) => b.score - a.score)

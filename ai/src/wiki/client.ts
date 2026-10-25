@@ -109,6 +109,31 @@ export class WikiClient {
     }
   }
 
+  /**
+   * Whether this reader may open an uploaded file.
+   *
+   * Wiki.js serves assets from the catch-all route, which checks
+   * `read:assets` against the file's path and answers 403 when it refuses
+   * (server/controllers/common.js). A HEAD costs nothing once the file is
+   * in the wiki's cache, which the indexer's own download has already
+   * warmed. Anything other than a plain 200 is treated as "no".
+   */
+  async canReadAsset (path: string): Promise<boolean> {
+    const clean = path.replace(/^\/+/, '')
+    try {
+      const response = await this.#fetch(`/${encodeURI(clean)}`, {
+        method: 'HEAD',
+        redirect: 'manual'
+      })
+      if (response.status !== 200) { return false }
+      // A page extension lands in the page branch, which answers with HTML
+      // whether or not the reader may see anything.
+      return !(response.headers.get('content-type') ?? '').startsWith('text/html')
+    } catch {
+      return false
+    }
+  }
+
   async #fetch (path: string, init: RequestInit): Promise<Response> {
     const headers = new Headers(init.headers)
     if (this.#token) {

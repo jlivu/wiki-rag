@@ -9,11 +9,17 @@
 import type { FastifyPluginAsync } from 'fastify'
 
 import type { Indexer } from '../indexer/indexer.js'
-import type { PageEvent } from '../index-db/queue.js'
+import type { IndexEvent } from '../index-db/queue.js'
 
 export const INTERNAL_PREFIX = '/internal'
 
-const EVENTS: readonly PageEvent[] = ['created', 'updated', 'deleted', 'renamed']
+const EVENTS: readonly IndexEvent[] = ['created', 'updated', 'deleted', 'renamed']
+/** What Wiki.js calls its asset hooks, mapped onto the queue's events. */
+const ASSET_EVENTS: Record<string, IndexEvent> = {
+  uploaded: 'updated',
+  renamed: 'renamed',
+  deleted: 'deleted'
+}
 
 interface PageEventBody {
   event?: unknown
@@ -30,7 +36,7 @@ export function internalRoutes (indexer: Indexer): FastifyPluginAsync {
       const event = typeof body.event === 'string' ? body.event : ''
       const id = Number(body.id)
 
-      if (!EVENTS.includes(event as PageEvent) || !Number.isInteger(id) || id <= 0) {
+      if (!EVENTS.includes(event as IndexEvent) || !Number.isInteger(id) || id <= 0) {
         return reply.code(400).send({ ok: false, error: 'expected { event, id, path, locale }' })
       }
       if (!indexer.enabled) {
@@ -39,10 +45,38 @@ export function internalRoutes (indexer: Indexer): FastifyPluginAsync {
       }
 
       await indexer.enqueuePageEvent({
-        event: event as PageEvent,
+        event: event as IndexEvent,
         id,
         path: typeof body.path === 'string' ? body.path : null,
         locale: typeof body.locale === 'string' ? body.locale : null
+      })
+      return reply.code(202).send({ ok: true, queued: true })
+    })
+
+    /**
+     * A file was uploaded, renamed or deleted in the asset manager.
+     *
+     * A rename sends the new path; the job re-reads the asset anyway, so
+     * the path here is only for the log and for an event that arrives
+     * before the file is visible to a listing.
+     */
+    app.post(`${INTERNAL_PREFIX}/asset-event`, async (request, reply) => {
+      const body = (request.body ?? {}) as PageEventBody
+      const name = typeof body.event === 'string' ? body.event : ''
+      const event = ASSET_EVENTS[name]
+      const id = Number(body.id)
+
+      if (!event || !Number.isInteger(id) || id <= 0) {
+        return reply.code(400).send({ ok: false, error: 'expected { event: uploaded|renamed|deleted, id, path }' })
+      }
+      if (!indexer.enabled) {
+        return reply.code(202).send({ ok: true, queued: false, reason: 'the indexer is off' })
+      }
+
+      await indexer.enqueueAssetEvent({
+        event,
+        id,
+        path: typeof body.path === 'string' ? body.path : null
       })
       return reply.code(202).send({ ok: true, queued: true })
     })

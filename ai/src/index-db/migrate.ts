@@ -100,6 +100,51 @@ const MIGRATIONS: Migration[] = [
   {
     name: '008-chunk-anchor',
     sql: `ALTER TABLE index_chunks ADD COLUMN IF NOT EXISTS anchor text NOT NULL DEFAULT ''`
+  },
+  {
+    // Uploaded files live in the same index as pages, so one search ranks
+    // both. A chunk therefore belongs to a page or to a document, never to
+    // both and never to neither.
+    name: '009-documents',
+    sql: `
+      CREATE TABLE IF NOT EXISTS index_documents (
+        id          integer PRIMARY KEY,
+        path        text NOT NULL,
+        file_name   text NOT NULL,
+        ext         text NOT NULL DEFAULT '',
+        mime        text NOT NULL DEFAULT '',
+        doc_type    text NOT NULL DEFAULT '',
+        file_size   bigint NOT NULL DEFAULT 0,
+        updated_at  timestamptz NOT NULL,
+        source_hash text NOT NULL DEFAULT '',
+        status      text NOT NULL DEFAULT 'indexed',
+        reason      text NOT NULL DEFAULT '',
+        indexed_at  timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS index_documents_path ON index_documents (path);
+
+      ALTER TABLE index_chunks ALTER COLUMN page_id DROP NOT NULL;
+      ALTER TABLE index_chunks
+        ADD COLUMN IF NOT EXISTS document_id integer REFERENCES index_documents (id) ON DELETE CASCADE;
+      ALTER TABLE index_chunks ADD COLUMN IF NOT EXISTS location text NOT NULL DEFAULT '';
+      ALTER TABLE index_chunks DROP CONSTRAINT IF EXISTS index_chunks_owner;
+      ALTER TABLE index_chunks
+        ADD CONSTRAINT index_chunks_owner CHECK (num_nonnulls(page_id, document_id) = 1);
+      CREATE UNIQUE INDEX IF NOT EXISTS index_chunks_document_ordinal ON index_chunks (document_id, ordinal);
+      CREATE INDEX IF NOT EXISTS index_chunks_document_hash ON index_chunks (document_id, content_hash);
+
+      CREATE TABLE IF NOT EXISTS index_document_links (
+        asset_path text NOT NULL,
+        page_id    integer NOT NULL REFERENCES index_pages (id) ON DELETE CASCADE,
+        PRIMARY KEY (asset_path, page_id)
+      );
+      CREATE INDEX IF NOT EXISTS index_document_links_page ON index_document_links (page_id);
+
+      ALTER TABLE index_queue RENAME COLUMN page_id TO entity_id;
+      ALTER TABLE index_queue ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'page';
+      ALTER TABLE index_queue DROP CONSTRAINT IF EXISTS index_queue_pkey;
+      ALTER TABLE index_queue ADD PRIMARY KEY (kind, entity_id);
+    `
   }
 ]
 
@@ -179,6 +224,7 @@ export async function ensureEmbeddingColumn (
     if (reset) {
       // Everything has to be read and embedded again.
       await client.query('TRUNCATE index_pages CASCADE')
+      await client.query('TRUNCATE index_documents CASCADE')
     }
     await client.query(`ALTER TABLE index_chunks ADD COLUMN embedding vector(${dims})`)
     await client.query(`

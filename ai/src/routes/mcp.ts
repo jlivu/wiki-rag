@@ -84,6 +84,7 @@ export function mcpRoutes (config: Config, indexer: Indexer): FastifyPluginAsync
         wiki,
         token,
         retriever: indexer.retriever,
+        index: indexer.database,
         defaultLocale: config.index.defaultLocale,
         publicUrl: config.wikiPublicUrl
       }, call => {

@@ -7,6 +7,9 @@
  * — an API key rather than a browser cookie — and Wiki.js applies that key's
  * group permissions either way.
  */
+import type { Pool } from 'pg'
+
+import { documentChunks, findDocumentByPath } from '../index-db/search.js'
 import type { Retriever } from '../indexer/retrieval.js'
 import { WikiClient, WikiError } from '../wiki/client.js'
 import { htmlToMarkdown, trimForContext } from '../wiki/markdown.js'
@@ -28,6 +31,8 @@ export interface McpToolContext {
   token: string
   /** Shared with the panel; its permission filter runs as this reader. */
   retriever: Retriever | null
+  /** The index itself, for reading an uploaded file's extracted text. */
+  index: Pool | null
   defaultLocale: string
   /** Where a human would open a page, for citations. */
   publicUrl: string
@@ -41,6 +46,11 @@ export interface ToolResult {
 
 export function pageUrl (publicUrl: string, locale: string, path: string, anchor = ''): string {
   return `${publicUrl}/${locale}/${path.replace(/^\/+/, '')}${anchor}`
+}
+
+/** An uploaded file sits at the site root, with no locale segment. */
+export function fileUrl (publicUrl: string, path: string, anchor = ''): string {
+  return `${publicUrl}/${path.replace(/^\/+/, '')}${anchor}`
 }
 
 /* ── search_wiki ───────────────────────────────────────────────────── */
@@ -59,19 +69,93 @@ export async function searchWiki (
   const found = await ctx.retriever.search(query, locale, limit, ctx.wiki, ctx.token)
   return ok({
     query,
-    results: found.results.map(page => ({
-      title: page.title,
-      path: page.path,
-      locale: page.locale,
-      // Straight to the section that matched.
-      url: pageUrl(ctx.publicUrl, page.locale, page.path, page.anchor),
-      heading: page.heading,
-      snippet: page.snippet,
-      updatedAt: page.updatedAt,
-      score: page.score
-    })),
+    results: found.results.map(item => (
+      item.kind === 'document'
+        ? {
+            kind: 'document',
+            title: item.fileName,
+            fileName: item.fileName,
+            fileType: item.docType,
+            path: item.path,
+            // Straight to the page of the PDF, where the format allows it.
+            url: fileUrl(ctx.publicUrl, item.path, item.anchor),
+            location: item.location,
+            snippet: item.snippet,
+            updatedAt: item.updatedAt,
+            ...(item.linkedFrom.length > 0
+              ? {
+                  linkedFrom: item.linkedFrom.map(page => ({
+                    title: page.title,
+                    url: pageUrl(ctx.publicUrl, page.locale, page.path)
+                  }))
+                }
+              : {}),
+            score: item.score
+          }
+        : {
+            kind: 'page',
+            title: item.title,
+            path: item.path,
+            locale: item.locale,
+            // Straight to the section that matched.
+            url: pageUrl(ctx.publicUrl, item.locale, item.path, item.anchor),
+            heading: item.heading,
+            snippet: item.snippet,
+            updatedAt: item.updatedAt,
+            score: item.score
+          }
+    )),
     ...(found.results.length === 0 ? { note: 'Nothing matched. Try different wording.' } : {})
   })
+}
+
+/* ── get_document ──────────────────────────────────────────────────── */
+
+export async function getDocument (
+  ctx: McpToolContext,
+  args: { path?: unknown }
+): Promise<ToolResult> {
+  const rawPath = asString(args.path)
+  if (!rawPath) { return error('get_document needs a "path".') }
+  if (!ctx.index) { return error('Uploaded files are not indexed here.') }
+
+  const path = rawPath.replace(/^\/+/, '').split('#')[0] ?? ''
+  const document = await findDocumentByPath(ctx.index, path)
+  if (!document) {
+    return error(`There is no indexed file at "${path}". Use the path exactly as search_wiki returned it.`)
+  }
+  // The key's own access, checked against Wiki.js, exactly as for a page.
+  if (!await ctx.wiki.canReadAsset(path)) {
+    return error(`This key is not allowed to read /${path}.`)
+  }
+  if (document.status !== 'indexed') {
+    return error(`That file has no searchable text: ${document.reason || document.status}.`)
+  }
+
+  const chunks = await documentChunks(ctx.index, document.id)
+  const body = chunks
+    .map(chunk => (chunk.location ? `## ${chunk.location}\n\n${stripPrefix(chunk.text)}` : stripPrefix(chunk.text)))
+    .join('\n\n')
+  const trimmed = trimForContext(body, MAX_PAGE_CHARS)
+
+  return ok({
+    kind: 'document',
+    fileName: document.fileName,
+    fileType: document.docType,
+    path: document.path,
+    url: fileUrl(ctx.publicUrl, document.path),
+    updatedAt: document.updatedAt,
+    fileSize: document.fileSize,
+    truncated: trimmed.truncated,
+    note: 'Each "## …" heading says where in the file the text below it came from; cite that with the url.',
+    content: trimmed.text
+  })
+}
+
+/** A chunk repeats "file name › location" at the top; the heading says it. */
+function stripPrefix (text: string): string {
+  const at = text.indexOf('\n\n')
+  return at > 0 && at < 200 ? text.slice(at + 2) : text
 }
 
 /* ── get_page ──────────────────────────────────────────────────────── */

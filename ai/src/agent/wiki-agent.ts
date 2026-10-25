@@ -220,11 +220,22 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
         items: shown.map(source => ({
           title: source.title,
           path: source.path,
-          locale: source.locale,
+          ...(source.locale ? { locale: source.locale } : {}),
           snippet: source.snippet,
           ...(source.updatedAt ? { updatedAt: source.updatedAt } : {}),
           ...(source.section ? { section: source.section } : {}),
-          ...(source.anchor ? { anchor: source.anchor } : {})
+          ...(source.anchor ? { anchor: source.anchor } : {}),
+          ...(source.kind === 'document'
+            ? {
+                kind: 'document' as const,
+                fileName: source.fileName || source.title,
+                ...(source.fileType ? { fileType: source.fileType } : {}),
+                ...(source.location ? { location: source.location } : {}),
+                ...(source.linkedFrom.length > 0
+                  ? { linkedFrom: source.linkedFrom.map(page => ({ title: page.title, path: page.path, locale: page.locale })) }
+                  : {})
+              }
+            : {})
         }))
       }
     }
