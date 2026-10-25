@@ -13,7 +13,7 @@ Project memory for Claude Code. Keep it short and factual, and update it when a 
 
 1. A slide-in assistant panel inside Wiki.js (done, see below).
 2. A RAG knowledge base built from wiki pages, updated whenever a page is saved.
-3. A chat assistant that answers from the knowledge base, with generative UI cards.
+3. A chat assistant that answers from the knowledge base, with generative UI cards (the chat app is built; it answers from mock data until step 3).
 4. An MCP server so AI agents can search and read the wiki.
 
 ## Architecture decisions
@@ -30,14 +30,17 @@ Project memory for Claude Code. Keep it short and factual, and update it when a 
     - `{ type: 'wiki-ai:status', label, online }` updates the header status chip
     - `{ type: 'wiki-ai:unread', count }` sets the launcher badge
     - `{ type: 'wiki-ai:close' }` closes the panel
-- AI service (started):
-  - `ai/` — Node 22, TypeScript, Fastify, `tsx watch` for development. Versions are pinned and `ai/package-lock.json` is committed.
-  - The proxy passes the path through, so routes keep the `/ai` prefix: `GET /ai/health` returns `{ ok: true }`, `GET /ai/panel` serves `ai/public/panel.html` (the plain-HTML stub the panel loads; the React chat app replaces it next).
-  - `dev/containers/docker-compose.ai.yml` adds the service (`ai:4000`, Docker network only) and a Caddy proxy on http://127.0.0.1:3080 that sends `/ai/*` to it and everything else to `wiki-app:3000`. It does not touch `dev/containers/docker-compose.yml`.
+- AI service (done, answering from mock data):
+  - `ai/` — Node 22, TypeScript, Fastify, `tsx watch` for development. `ai/panel-ui/` is the chat app (React 19, Vite). `ai/shared/` holds the page context and the answer-component shapes both halves use; it has no dependencies on purpose, because the two are separate npm projects with separate `node_modules`. Versions are pinned and both `package-lock.json` files are committed.
+  - The proxy passes the path through, so routes keep the `/ai` prefix: `GET /ai/health` returns `{ ok: true }`, `POST /ai/api/agent` streams one run, `/ai/panel/` is the chat app.
+  - Protocol: AG-UI 1.0 over SSE, with the project's own packages — `@ag-ui/client` (`HttpAgent`) in the browser, `@ag-ui/core` and `@ag-ui/encoder` on the server. The page the reader is on travels in `forwardedProps.page`. A card is a tool call: the name has to be one of `sources`, `checklist`, `known_issue`, `table`, `draft_page` and the arguments have to pass `parsePanelComponent` in `ai/shared/components.ts`, or the panel ignores it.
+  - `ai/src/agent/mock-agent.ts` picks a canned answer by keyword with no model call: restore, error 3201, compare, sources, draft, and a short text answer for anything else. Step 3 replaces it; the schemas stay.
+  - `dev/containers/docker-compose.ai.yml` adds the service (`ai:4000`), the chat app's Vite dev server (`panel-ui:5173`) and a Caddy proxy on http://127.0.0.1:3080. Only the proxy publishes a port, and the file does not touch `dev/containers/docker-compose.yml`.
+  - In development the proxy sends `/ai/panel*` to Vite, hot reload included (its socket runs over port 3080). In production the Fastify service serves `ai/panel-ui/dist` instead.
   - Two settings have to be set by hand in the wiki; `ai/README.md` has them.
 - Indexing (planned): a custom storage module in `server/modules/storage/rag/` whose `created`, `updated`, `deleted` and `renamed` hooks send `{ event, id }` to the AI service without waiting for it. The AI service queues and debounces events, fetches the page through GraphQL, splits it at headings, embeds only changed chunks, and stores them in Postgres with pgvector plus full-text search (hybrid retrieval). A scheduled reconciliation pass handles the initial backfill and any missed events.
 - Permissions (planned): check each retrieved page against Wiki.js GraphQL using the asking user's own login token, instead of storing access rules in the index.
-- Chat UI (planned): React and TypeScript inside the iframe, streaming AG-UI-style events. Answers use a fixed set of UI components: source cards, SOP checklist, known-issue card, table, draft-page form.
+- Chat UI (done, on mock data): React and TypeScript in the iframe, streaming AG-UI events. Layout and dimensions follow the assistant panel in `docs/design/tanagraon-unified-ui.html`; colours follow Wiki.js, light and dark, from the `theme` query parameter. Assistant text is Markdown with raw HTML off (no `rehype-raw`). Enter sends, Shift+Enter adds a line. The conversation and its thread ID live in `sessionStorage`, so it survives moving between wiki pages for as long as the tab is open. Answers use a fixed set of components: source cards, SOP checklist, known-issue card, table, draft-page form.
 - Open decision: local models (Ollama) or a cloud API. Ask before writing any model-provider code.
 
 ## Wiki.js 2.x codebase notes
@@ -58,8 +61,9 @@ Project memory for Claude Code. Keep it short and factual, and update it when a 
 - Run the dev server in the background with a readable log:
   `docker exec -d wiki-app sh -c 'yarn dev > /tmp/yarn-dev.log 2>&1'`
 - Check the build: `docker exec wiki-app sh -c "grep -nE 'Compiled|ERROR|Failed' /tmp/yarn-dev.log | tail -n 20"`
-- Never run `yarn` or `npm install` for Wiki.js on the Mac itself.
-- Dev ports: proxy 3080, wiki 3002, Adminer 3001, dev database 15432. The AI service listens on 4000 inside the Docker network only. Host ports already used by other projects: 3000, 5050, 5435, 5438, 6333-6334, 6379, 8001, 8080, 8088, 8089, 8501, 9000-9001, 54322.
+- Never run `yarn` or `npm install` for Wiki.js on the Mac itself. The same goes for `ai/` and `ai/panel-ui/`: install in the container, e.g. `docker exec wiki-ai npm install --package-lock-only`.
+- After changing a `package.json` under `ai/`, rebuild with `--renew-anon-volumes`, or the container keeps the `node_modules` volume from the old image and the new dependency is missing.
+- Dev ports: proxy 3080, wiki 3002, Adminer 3001, dev database 15432. The AI service (4000) and the chat app's Vite server (5173) listen inside the Docker network only. Host ports already used by other projects: 3000, 5050, 5435, 5438, 6333-6334, 6379, 8001, 8080, 8088, 8089, 8501, 9000-9001, 54322.
 - Open the dev wiki at http://127.0.0.1:3080 (through the proxy), so the wiki and the assistant panel share one origin. Port 3002 reaches Wiki.js directly, without `/ai/`. Use 127.0.0.1, not localhost: this keeps the login separate from the installed wiki at localhost:8088.
 - Hot reload cannot swap store modules. After changing anything under `client/store/`, do a full reload (Cmd+Shift+R).
 - Production image: `docker build -f dev/build/Dockerfile -t <tag> .` (use `docker buildx build --platform linux/amd64` for an x86 server). The source reports version 2.0.0 because official builds stamp the real version; handle this when building the production image.

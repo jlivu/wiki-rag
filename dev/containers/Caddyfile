@@ -1,19 +1,36 @@
 # -- DEV REVERSE PROXY --
 # -- DO NOT USE IN PRODUCTION! --
 #
-# One origin for both halves of the assistant:
-#   /ai/*  -> the AI service, path unchanged (so it still sees /ai/panel)
-#   /*     -> Wiki.js
+# One origin for every part of the assistant:
+#   /ai/panel*  -> the Vite dev server (the chat app, with hot reload)
+#   /ai/*       -> the AI service, path unchanged (so it still sees /ai/health)
+#   /*          -> Wiki.js
+#
+# In production there is no Vite: the AI service serves the built chat app at
+# /ai/panel/ itself, so only the last two routes are needed.
 {
 	auto_https off
 	admin off
 }
 
 :80 {
-	# `handle` keeps the /ai prefix, unlike `handle_path`.
+	# Must come before /ai/*. `handle` keeps the path, unlike `handle_path`,
+	# which matters because Vite is configured with base /ai/panel/.
+	# This also carries Vite's hot-reload WebSocket, at /ai/panel/.
+	handle /ai/panel* {
+		# Vite is mounted at /ai/panel/ and 404s without the trailing
+		# slash. A rewrite, not a redirect, so the query string that
+		# carries the current wiki page survives.
+		rewrite /ai/panel /ai/panel/
+		reverse_proxy panel-ui:5173 {
+			flush_interval -1
+		}
+	}
+
 	handle /ai/* {
 		reverse_proxy ai:4000 {
-			# No response buffering, for streamed chat replies later on.
+			# No response buffering, so the agent's events arrive as they
+			# are produced rather than in one lump at the end.
 			flush_interval -1
 		}
 	}

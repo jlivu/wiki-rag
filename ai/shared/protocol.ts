@@ -1,0 +1,45 @@
+/**
+ * How the chat app and the AI service talk to each other, and how the chat
+ * app talks to the wiki page around it.
+ */
+import { readPageContext, type PageContext } from './components.js'
+
+/** Served by the Fastify service, behind the reverse proxy. */
+export const HEALTH_PATH = '/ai/health'
+export const AGENT_PATH = '/ai/api/agent'
+/** The chat app. Trailing slash: it is a directory of static files. */
+export const PANEL_PATH = '/ai/panel/'
+
+/**
+ * Extra fields on an AG-UI run. `page` is the wiki page the reader is on, so
+ * the agent can answer "this page" questions and rank nearby pages first.
+ */
+export interface ForwardedProps {
+  page?: PageContext
+}
+
+/** Never throws: a malformed page context just means the agent has none. */
+export function readForwardedPage (value: unknown): PageContext | undefined {
+  if (typeof value !== 'object' || value === null) { return undefined }
+  const page = (value as { page?: unknown }).page
+  if (page === undefined || page === null) { return undefined }
+  try {
+    return readPageContext(page)
+  } catch {
+    return undefined
+  }
+}
+
+/** Status chip text in the panel header. */
+export const STATUS_ONLINE_LABEL = 'Mock · Dev'
+export const STATUS_OFFLINE_LABEL = 'Offline'
+
+/**
+ * Messages the chat app posts to the wiki page that frames it. The panel
+ * (client/components/ai/chat-drawer.vue) checks the origin and the source
+ * window before acting on one.
+ */
+export type ParentMessage =
+  | { type: 'wiki-ai:status', label: string, online: boolean }
+  | { type: 'wiki-ai:unread', count: number }
+  | { type: 'wiki-ai:close' }

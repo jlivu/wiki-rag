@@ -1,4 +1,4 @@
-# -- DEV DOCKER-COMPOSE OVERLAY: AI SERVICE + REVERSE PROXY --
+# -- DEV DOCKER-COMPOSE OVERLAY: AI SERVICE + CHAT APP + REVERSE PROXY --
 # -- DO NOT USE IN PRODUCTION! --
 #
 # Adds the AI service and puts it on the same origin as the wiki, which is
@@ -27,12 +27,27 @@ services:
       - ../../ai:/app
       - /app/node_modules
 
+  # The chat app, in development: Vite with hot reload. In production the
+  # Fastify service serves panel-ui/dist instead and this is not needed.
+  panel-ui:
+    container_name: wiki-panel-ui
+    build:
+      # ai/, not ai/panel-ui/: the app imports the schemas in ai/shared.
+      context: ../../ai
+      dockerfile: panel-ui/Dockerfile
+    expose:
+      - "5173"
+    volumes:
+      - ../../ai:/app
+      - /app/panel-ui/node_modules
+
   proxy:
     container_name: wiki-proxy
     image: caddy:2.11.7-alpine
     depends_on:
       - wiki
       - ai
+      - panel-ui
     ports:
       - "3080:80"
     volumes:
