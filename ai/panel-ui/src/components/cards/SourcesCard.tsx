@@ -1,5 +1,6 @@
 import type { SourcesArgs } from '@shared'
 
+import { NEW_TAB_LINK, NewTabHint } from '../ExternalLink'
 import { ClockIcon, SourcesIcon } from '../Icons'
 import { wikiHref } from '../../lib/params'
 import { Card } from './Card'
@@ -13,9 +14,11 @@ export function SourcesCard ({ args, locale }: {
       <ul className="src-list">
         {args.items.map((item, index) => (
           <li key={`${item.path}-${index}`}>
-            {/* _top: the panel is in an iframe, the wiki page is not. */}
-            <a className="src" href={wikiHref(item.path, item.locale, locale)} target="_top">
-              <span className="src-title">{item.title}</span>
+            <a className="src" href={wikiHref(item.path, item.locale, locale)} {...NEW_TAB_LINK}>
+              <span className="src-title">
+                {item.title}
+                <NewTabHint />
+              </span>
               <span className="src-path">{wikiHref(item.path, item.locale, locale)}</span>
               <span className="src-snippet">{item.snippet}</span>
               {item.updatedAt

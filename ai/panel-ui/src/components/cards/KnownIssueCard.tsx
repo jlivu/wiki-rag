@@ -1,5 +1,6 @@
 import type { KnownIssueArgs } from '@shared'
 
+import { NEW_TAB_LINK, NewTabHint } from '../ExternalLink'
 import { AlertIcon } from '../Icons'
 import { wikiHref } from '../../lib/params'
 import { Card } from './Card'
@@ -39,8 +40,9 @@ export function KnownIssueCard ({ args, locale }: {
           : null}
         {args.source
           ? (
-            <a className="issue-source" href={wikiHref(args.source.path, args.source.locale, locale)} target="_top">
+            <a className="issue-source" href={wikiHref(args.source.path, args.source.locale, locale)} {...NEW_TAB_LINK}>
               {args.source.title}
+              <NewTabHint />
             </a>
             )
           : null}

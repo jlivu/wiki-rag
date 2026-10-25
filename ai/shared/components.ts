@@ -19,7 +19,7 @@ export interface PageContext {
   title: string
 }
 
-/** A link to a wiki page. The panel opens it in the main window. */
+/** A link to a wiki page. The panel opens it in a new browser tab. */
 export interface PageLink {
   title: string
   path: string

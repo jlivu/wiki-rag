@@ -140,6 +140,10 @@ separate `node_modules`.
   `theme` query parameter.
 - Assistant text is Markdown. Raw HTML is off: there is no `rehype-raw`, on
   purpose.
+- Every link opens in a new browser tab, with a small icon and "(opens in a
+  new tab)" in its accessible name. `index.html` carries
+  `<base target="_blank">` as well, so nothing can load inside the panel's
+  iframe.
 - The conversation and its thread ID are kept in `sessionStorage`, so it
   survives moving from one wiki page to the next for as long as the tab is
   open. Stored cards are re-checked against the shared schemas when they are
