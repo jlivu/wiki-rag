@@ -65,6 +65,8 @@
 <script>
 import { get, sync } from 'vuex-pathify'
 
+import aiStore from '@/store/ai'
+
 // The panel docks beside the page from this window width up,
 // and slides over the page on narrower screens.
 const DOCK_BREAKPOINT = 960
@@ -135,6 +137,13 @@ export default {
     },
     isDocked () {
       this.updateBodyClasses()
+    }
+  },
+  beforeCreate () {
+    // Registered here so this component owns its store module and
+    // client/store/index.js stays identical to upstream.
+    if (!this.$store.hasModule('ai')) {
+      this.$store.registerModule('ai', aiStore)
     }
   },
   mounted () {
