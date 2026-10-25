@@ -20,6 +20,7 @@ with `postMessage`, and both sides check the origin.
 | `/ai/health`    | `{ ok, provider: { id, model, label } }`. The panel's status chip shows the label. |
 | `/ai/api/agent` | One AG-UI run, streamed back as server-sent events.               |
 | `/ai/panel/`    | The chat app. Vite's dev server in development, the built files in production. |
+| `/ai/api/transcribe` | One recording in, its text out. Dictation only; nothing is stored. |
 | `/ai/mcp`       | MCP over Streamable HTTP, for agents outside the wiki.            |
 
 ## Start it
@@ -124,6 +125,11 @@ with no values; copy what you need.
 | `IMAGE_DESCRIBER_MODEL` | `claude-haiku-5-5`             | The vision model. `qwen3.5` when the describer is `ollama`. |
 | `IMAGE_DESCRIBE_EXCLUDE` | —                             | Asset folders whose images are never sent to a model. OCR and alt text still apply. |
 | `IMAGE_DESCRIBE_DAILY_LIMIT` | `200`                     | Descriptions a day, counted in the index so a restart does not reset it. |
+| `STT_PROVIDER`      | `whispercpp`                       | Dictation: `whispercpp` or `off`. Off hides the microphone button. |
+| `STT_URL`           | `http://host.docker.internal:8178` | whisper.cpp's server, running natively on the Mac. |
+| `STT_LANGUAGE`      | `en`                               | The language spoken. `auto` detects it, less accurately. |
+| `STT_MAX_SECONDS`   | `120`                              | The panel stops recording at this; the service refuses more. |
+| `STT_RATE_LIMIT_PER_MINUTE` | `20`                       | Recordings a reader may send per minute. |
 | `WIKI_PAGE_EXTENSIONS` | `md,html,txt`                   | Wiki.js's own `pageExtensions`. A file with one of these cannot be served as a file, so it is skipped. |
 
 Restart the service after editing `ai/.env` — `docker compose … up -d ai`
@@ -514,6 +520,97 @@ it supports — and the sync schedule defaults to every 30 minutes.
 The module stores nothing and writes no files. It posts
 `{ event, id, path, locale }` and returns immediately: a page save never
 waits for the assistant, and never fails because of it.
+
+## Dictation
+
+The composer has a microphone button with a chevron beside it. The button
+records; the chevron opens a popover with a live input-level meter and the
+list of microphones, the system default first and a check mark against the
+one in use. The choice is remembered in `localStorage`. Before the browser
+has been given permission it will not say what the devices are called, so
+the popover explains that and offers to ask.
+
+Pressing the button again stops; **Escape** cancels without transcribing;
+recording stops by itself at `STT_MAX_SECONDS`. The text is inserted at the
+cursor in the message box and **nothing is ever sent for the reader** —
+they read it, fix it and press Send.
+
+### Speech to text, locally
+
+Whisper runs on this Mac through whisper.cpp, natively rather than in a
+container so it can use the GPU — the same arrangement as Ollama.
+
+```
+brew install whisper.cpp                      # 1.9.5, Metal enabled
+mkdir -p /opt/homebrew/var/whisper/models
+curl -L -o /opt/homebrew/var/whisper/models/ggml-small.en.bin \
+  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+```
+
+`small.en` (465 MB) is the model in use: clearly better than `base.en` on
+part numbers and names, and still far quicker than real time. The server
+runs as a launch agent, `~/Library/LaunchAgents/vu.gov.doft.whisper-server.plist`,
+so it starts at login and is restarted if it exits:
+
+```
+launchctl load   ~/Library/LaunchAgents/vu.gov.doft.whisper-server.plist   # start, and at every login
+launchctl unload ~/Library/LaunchAgents/vu.gov.doft.whisper-server.plist   # stop, and stop starting
+tail -f /opt/homebrew/var/log/whisper-server.log                           # what it is doing
+```
+
+It listens on **`127.0.0.1:8178`**, and must stay there. whisper.cpp has no
+authentication of any kind: anything that can reach the port can transcribe
+audio on this machine. Binding it to `0.0.0.0` would hand that to everyone
+on the network.
+
+Loopback is enough because Docker Desktop for Mac forwards
+`host.docker.internal` (192.168.65.254 inside the container) to the Mac's
+loopback — the connection is made by Docker Desktop on the host, so it
+arrives on `127.0.0.1`. Ollama is the proof: it has always been loopback
+only, and the indexer has always reached it. Verified both ways here — the
+container gets HTTP 200 from `host.docker.internal:8178`, while the Mac's
+own LAN address refuses the connection.
+
+The first start after an upgrade compiles Metal shaders and takes a few
+minutes; the compiled set is cached, and later starts take seconds.
+
+### POST /ai/api/transcribe
+
+The browser sends 16 kHz mono WAV — it converts the recording itself with
+the Web Audio API, so the service needs no ffmpeg and whisper.cpp never has
+to transcode. The service checks the RIFF header rather than trusting it,
+refuses anything else, and forwards the audio to whisper.cpp.
+
+| Answer | When |
+| ------ | ---- |
+| `200 { text, seconds, ms }` | transcribed; `text` is empty if nothing was heard |
+| `400` | not a WAV, not 16 kHz mono, not 16-bit PCM, or empty |
+| `413` | longer than `STT_MAX_SECONDS` |
+| `429` | more than `STT_RATE_LIMIT_PER_MINUTE` from one reader, with `Retry-After` |
+| `503` | whisper.cpp did not answer, or `STT_PROVIDER=off` |
+
+The audio is never written to disk and never logged. One line is logged per
+recording — `{"seconds":9.8,"bytes":312364,"chars":147,"ms":448}` — and the
+words are not in it.
+
+Whisper writes something even when it hears nothing: given silence it
+produces one of a few stock phrases ("you", "Thank you.", "[BLANK_AUDIO]")
+learnt from the end of its training clips. A transcript that is only filler
+is treated as nothing heard, so a mis-press inserts nothing.
+
+`GET /ai/health` reports `speech.enabled`, and the panel shows no
+microphone at all when it is false. That is not just the setting: the
+service also checks that whisper.cpp answers, cached for 30 seconds, so a
+half-finished setup never shows a button that cannot work.
+
+### HTTPS in production
+
+Browsers only allow microphone access in a secure context. `localhost` and
+`127.0.0.1` count as secure, which is why dictation works in development
+over plain HTTP, but any other hostname does not: on a real address the
+wiki has to be served over HTTPS or the microphone button will be there and
+`getUserMedia` will refuse. The panel says so plainly when it happens
+("The browser blocked the microphone"), but the fix is a certificate.
 
 ## MCP: the wiki as a tool for agents
 

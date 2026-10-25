@@ -123,3 +123,37 @@ export function ImageIcon () {
     </svg>
   )
 }
+
+export function MicrophoneIcon () {
+  return (
+    <svg {...base}>
+      <rect x="6" y="1.8" width="4" height="8" rx="2" />
+      <path d="M3.4 7.4a4.6 4.6 0 0 0 9.2 0" />
+      <line x1="8" y1="12" x2="8" y2="14.4" />
+    </svg>
+  )
+}
+
+export function StopIcon () {
+  return (
+    <svg {...base} fill="currentColor">
+      <rect x="4.5" y="4.5" width="7" height="7" rx="1.4" stroke="none" />
+    </svg>
+  )
+}
+
+export function ChevronIcon () {
+  return (
+    <svg {...base} width={11} height={11}>
+      <polyline points="4,6.5 8,10.5 12,6.5" />
+    </svg>
+  )
+}
+
+export function CheckIcon () {
+  return (
+    <svg {...base} width={12} height={12}>
+      <polyline points="3,8.5 6.2,11.5 13,4.5" />
+    </svg>
+  )
+}

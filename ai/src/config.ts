@@ -44,6 +44,19 @@ export interface IndexConfig {
   pageExtensions: string[]
 }
 
+/** Dictation: speech to text, on this machine. */
+export interface SpeechConfig {
+  /** 'whispercpp' or 'off'. Off hides the microphone in the panel. */
+  provider: 'whispercpp' | 'off'
+  /** whisper.cpp's server. It runs natively on the Mac, for the GPU. */
+  url: string
+  language: string
+  /** Longest recording accepted, in seconds. */
+  maxSeconds: number
+  /** Recordings per reader per minute. */
+  rateLimitPerMinute: number
+}
+
 /** Reading pictures: OCR is local and free, a description is neither. */
 export interface ImageConfig {
   /** Which vision model describes an image, or 'off' for none. */
@@ -76,6 +89,7 @@ export interface Config {
   llm: LlmConfig
   index: IndexConfig
   images: ImageConfig
+  speech: SpeechConfig
 }
 
 const DEFAULT_MODELS: Record<ProviderId, string> = {
@@ -134,8 +148,25 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
         .map(folder => folder.replace(/^\/+|\/+$/g, '').toLowerCase())
         .filter(folder => folder.length > 0),
       describeDailyLimit: readInt(env.IMAGE_DESCRIBE_DAILY_LIMIT, 200)
+    },
+    speech: {
+      provider: readSpeechProvider(env.STT_PROVIDER),
+      // Whisper runs natively on the Mac so it can use the GPU, the same
+      // arrangement as Ollama; containers reach it through the host.
+      url: trimSlash(env.STT_URL ?? 'http://host.docker.internal:8178'),
+      language: nonEmpty(env.STT_LANGUAGE) ?? 'en',
+      maxSeconds: readInt(env.STT_MAX_SECONDS, 120),
+      rateLimitPerMinute: readInt(env.STT_RATE_LIMIT_PER_MINUTE, 20)
     }
   }
+}
+
+function readSpeechProvider (value: string | undefined): 'whispercpp' | 'off' {
+  const name = (value ?? 'whispercpp').trim().toLowerCase()
+  if (name !== 'whispercpp' && name !== 'off') {
+    throw new Error(`STT_PROVIDER must be whispercpp or off (got "${value}")`)
+  }
+  return name
 }
 
 /**
@@ -178,6 +209,10 @@ export function describeConfig (config: Config): Record<string, unknown> {
     imageDescriberModel: config.images.describer === 'off' ? null : config.images.describerModel,
     imageDescribeExclude: config.images.describeExclude,
     imageDescribeDailyLimit: config.images.describeDailyLimit,
+    speechProvider: config.speech.provider,
+    speechUrl: config.speech.provider === 'off' ? null : config.speech.url,
+    speechLanguage: config.speech.language,
+    speechMaxSeconds: config.speech.maxSeconds,
     pageExtensions: config.index.pageExtensions,
     wikiPublicUrl: config.wikiPublicUrl,
     mcpRateLimitPerMinute: config.mcp.rateLimitPerMinute

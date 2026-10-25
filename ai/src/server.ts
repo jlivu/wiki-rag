@@ -4,11 +4,12 @@ import { agentRoutes } from './routes/agent.js'
 import { internalRoutes } from './routes/internal.js'
 import { mcpRoutes } from './routes/mcp.js'
 import { panelRoutes } from './routes/panel.js'
+import { speechAvailable, transcribeRoutes } from './routes/transcribe.js'
 import { describeConfig, loadConfig } from './config.js'
 import { Indexer } from './indexer/indexer.js'
 import { closePool } from './index-db/pool.js'
 import { providerLabel } from './providers/index.js'
-import { HEALTH_PATH, type HealthResponse } from '../shared/index.js'
+import { HEALTH_PATH, SPEECH_SAMPLE_RATE, type HealthResponse } from '../shared/index.js'
 
 // A reverse proxy puts this service and the wiki on one origin and sends
 // /ai/* here with the path unchanged, so every route keeps the /ai prefix.
@@ -27,6 +28,12 @@ app.get(HEALTH_PATH, async (): Promise<HealthResponse> => {
       id: config.llm.provider,
       model: config.llm.model,
       label: providerLabel(config)
+    },
+    // The panel shows no microphone at all when dictation is off.
+    speech: {
+      enabled: await speechAvailable(config),
+      maxSeconds: config.speech.maxSeconds,
+      sampleRate: SPEECH_SAMPLE_RATE
     }
   }
 })
@@ -36,6 +43,7 @@ const indexer = new Indexer(config, app.log)
 await app.register(agentRoutes(config, indexer))
 await app.register(internalRoutes(indexer))
 await app.register(mcpRoutes(config, indexer))
+await app.register(transcribeRoutes(config))
 await app.register(panelRoutes)
 
 // Let tsx watch and `docker compose` restarts free the port cleanly.

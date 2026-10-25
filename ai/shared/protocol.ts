@@ -42,7 +42,21 @@ export interface HealthResponse {
     /** Status chip text, e.g. "Claude Sonnet 5.5 · Cloud". */
     label: string
   }
+  /** Dictation. With `enabled: false` the panel shows no microphone. */
+  speech: {
+    enabled: boolean
+    /** Longest recording the service will accept, in seconds. */
+    maxSeconds: number
+    /** What the browser should record and send: 16 kHz mono WAV. */
+    sampleRate: number
+  }
 }
+
+/** Where the panel sends a recording. */
+export const TRANSCRIBE_PATH = '/ai/api/transcribe'
+
+/** The one audio shape the service takes, so it never has to transcode. */
+export const SPEECH_SAMPLE_RATE = 16000
 
 /** Status chip text in the panel header, when the service has not said. */
 export const STATUS_ONLINE_LABEL = 'Connected'

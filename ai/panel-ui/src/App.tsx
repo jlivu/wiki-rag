@@ -23,6 +23,7 @@ export default function App ({ params }: { params: PanelParams }) {
   const [busy, setBusy] = useState(false)
   const [online, setOnline] = useState<boolean | null>(null)
   const [statusLabel, setStatusLabel] = useState<string | undefined>(undefined)
+  const [speech, setSpeech] = useState<HealthResponse['speech'] | undefined>(undefined)
   const [announcement, setAnnouncement] = useState('')
   const [focusToken, setFocusToken] = useState(0)
 
@@ -57,6 +58,8 @@ export default function App ({ params }: { params: PanelParams }) {
       .then(body => {
         if (cancelled) { return }
         setStatusLabel(body.provider?.label)
+        // No speech service, no microphone button.
+        setSpeech(body.speech)
         setOnline(body.ok === true)
       })
       .catch(() => { if (!cancelled) { setOnline(false) } })
@@ -218,7 +221,12 @@ export default function App ({ params }: { params: PanelParams }) {
   return (
     <div className="panel">
       <MessageFeed messages={messages} locale={params.page.locale} />
-      <Composer busy={busy} focusToken={focusToken} onSend={text => { void send(text) }} />
+      <Composer
+        busy={busy}
+        focusToken={focusToken}
+        onSend={text => { void send(text) }}
+        {...(speech ? { speech } : {})}
+      />
       {/* Finished replies are announced; the tokens on the way are not. */}
       <p className="sr-only" role="status" aria-live="polite">{announcement}</p>
     </div>
