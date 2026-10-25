@@ -10,9 +10,13 @@ import { TableCard } from './TableCard'
  * The fixed set of answer components. A tool call that is not one of these
  * never reaches here: parsePanelComponent drops it first.
  */
-export function AnswerComponent ({ component, locale }: {
+export function AnswerComponent ({ component, locale, signedIn, cardKey }: {
   component: PanelComponent
   locale: string
+  /** Whether the reader is logged in, for the draft card's button. */
+  signedIn: boolean
+  /** Identifies this card within the conversation. */
+  cardKey: string
 }) {
   switch (component.name) {
     case 'sources':
@@ -24,6 +28,6 @@ export function AnswerComponent ({ component, locale }: {
     case 'table':
       return <TableCard args={component.args} />
     case 'draft_page':
-      return <DraftPageCard args={component.args} />
+      return <DraftPageCard args={component.args} locale={locale} signedIn={signedIn} cardKey={cardKey} />
   }
 }

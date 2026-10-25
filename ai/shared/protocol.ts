@@ -42,6 +42,8 @@ export interface HealthResponse {
     /** Status chip text, e.g. "Claude Sonnet 5.5 · Cloud". */
     label: string
   }
+  /** True when the browser sent a Wiki.js login cookie. */
+  signedIn: boolean
   /** Dictation. With `enabled: false` the panel shows no microphone. */
   speech: {
     enabled: boolean

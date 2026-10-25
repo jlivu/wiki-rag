@@ -12,6 +12,8 @@ import type { Pool } from 'pg'
 import { documentChunks, findDocumentByPath } from '../index-db/search.js'
 import type { Retriever } from '../indexer/retrieval.js'
 import { WikiClient, WikiError } from '../wiki/client.js'
+import { createPage } from '../wiki/pages.js'
+import { AI_DRAFT_TAG } from '../../shared/index.js'
 import { htmlToMarkdown, trimForContext } from '../wiki/markdown.js'
 
 /** A page body longer than this is cut, with a note saying so. */
@@ -23,7 +25,6 @@ const MAX_LIST_LIMIT = 500
 /** Folder reads while walking the tree, so a deep wiki cannot hang a call. */
 const MAX_TREE_CALLS = 80
 const DRAFT_PREFIX = 'drafts/'
-const DRAFT_TAG = 'ai-draft'
 
 export interface McpToolContext {
   /** Reads the wiki as the key that made the request. */
@@ -276,32 +277,6 @@ function couldContain (folderPath: string, prefix: string): boolean {
 
 /* ── create_draft_page ─────────────────────────────────────────────── */
 
-const CREATE_MUTATION = `
-  mutation AiMcpCreate(
-    $content: String!, $description: String!, $editor: String!,
-    $isPublished: Boolean!, $isPrivate: Boolean!, $locale: String!,
-    $path: String!, $tags: [String]!, $title: String!,
-    $scriptCss: String, $scriptJs: String,
-    $publishStartDate: Date, $publishEndDate: Date
-  ) {
-    pages {
-      create(
-        content: $content, description: $description, editor: $editor,
-        isPublished: $isPublished, isPrivate: $isPrivate, locale: $locale,
-        path: $path, tags: $tags, title: $title,
-        scriptCss: $scriptCss, scriptJs: $scriptJs,
-        publishStartDate: $publishStartDate, publishEndDate: $publishEndDate
-      ) {
-        responseResult { succeeded slug message }
-        # Not locale: a freshly created page carries localeCode, and
-        # selecting the non-nullable Page.locale fails after the page has
-        # already been written.
-        page { id path }
-      }
-    }
-  }
-`
-
 export async function createDraftPage (
   ctx: McpToolContext,
   args: { title?: unknown, path?: unknown, content?: unknown, description?: unknown }
@@ -314,54 +289,30 @@ export async function createDraftPage (
   if (!content) { return error('create_draft_page needs "content".') }
 
   const locale = ctx.defaultLocale
-  const path = draftPath(rawPath, locale)
-  const description = asString(args.description) ?? `Draft created by an AI agent. ${title}`
+  // An agent writes under drafts/ whether or not it said so. A person
+  // pressing the button on a draft card may choose the path; an agent
+  // may not.
+  const result = await createPage(ctx.wiki, {
+    title,
+    path: draftPath(rawPath, locale),
+    content,
+    description: asString(args.description) ?? `Draft created by an AI agent. ${title}`,
+    locale
+  }, { publicUrl: ctx.publicUrl, who: 'key' })
 
-  try {
-    // Every field pages.create declares: anything left out is written as a
-    // default, which is how a page silently ends up unpublished or untitled.
-    const data = await ctx.wiki.graphql<{
-      pages: { create: { responseResult: { succeeded: boolean, message: string }, page: { id: number, path: string } | null } }
-    }>(CREATE_MUTATION, {
-      content,
-      description,
-      editor: 'markdown',
-      isPublished: false,
-      isPrivate: false,
-      locale,
-      path,
-      tags: [DRAFT_TAG],
-      title,
-      scriptCss: '',
-      scriptJs: '',
-      publishStartDate: '',
-      publishEndDate: ''
-    })
+  if (!result.ok) { return error(result.error) }
 
-    const result = data.pages.create
-    if (!result.responseResult.succeeded || !result.page) {
-      return error(`The wiki refused to create the draft: ${result.responseResult.message}`)
-    }
-
-    return ok({
-      created: true,
-      id: result.page.id,
-      title,
-      path: result.page.path,
-      locale,
-      url: pageUrl(ctx.publicUrl, locale, result.page.path),
-      isPublished: false,
-      tags: [DRAFT_TAG],
-      note: 'This page is a draft. It is not published, it does not appear in the wiki or in search, and a person has to review and publish it before anyone can read it.'
-    })
-  } catch (err) {
-    if (err instanceof WikiError) {
-      return error(err.status === 403
-        ? 'This key is not allowed to create pages. It needs write:pages on drafts/.'
-        : `The wiki refused to create the draft: ${err.message}`)
-    }
-    throw err
-  }
+  return ok({
+    created: true,
+    id: result.page.id,
+    title: result.page.title,
+    path: result.page.path,
+    locale: result.page.locale,
+    url: result.page.viewUrl,
+    isPublished: false,
+    tags: [AI_DRAFT_TAG],
+    note: 'This page is a draft. It is not published, it does not appear in the wiki or in search, and a person has to review and publish it before anyone can read it.'
+  })
 }
 
 /** Drafts live under drafts/, whether or not the agent said so. */

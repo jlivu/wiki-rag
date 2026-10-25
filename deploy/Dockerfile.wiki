@@ -1,0 +1,90 @@
+# Wiki.js, built from this fork.
+#
+# Upstream's own build image (dev/build/Dockerfile) with two changes, both
+# of which the official CI does too and a plain `docker build` does not:
+#
+#   * the version is stamped in. The source says 2.0.0 because official
+#     builds overwrite it; left alone, Admin > System Info would report a
+#     version that does not exist.
+#   * `dev` is turned off. `WIKI.devMode` comes from that field
+#     (server/core/config.js), and with it on the wiki runs as a
+#     development build.
+#
+# Build from the repository root:
+#   docker build -f deploy/Dockerfile.wiki -t wiki-rag/wiki:<tag> .
+
+# ====================
+# --- Build Assets ---
+# ====================
+FROM node:24-alpine AS assets
+
+RUN apk add yarn g++ make cmake python3 --no-cache
+
+WORKDIR /wiki
+
+COPY ./client ./client
+COPY ./dev ./dev
+COPY ./patches ./patches
+COPY ./package.json ./package.json
+COPY ./.babelrc ./.babelrc
+COPY ./.eslintignore ./.eslintignore
+COPY ./.eslintrc.yml ./.eslintrc.yml
+
+# The version this build reports. The default is the upstream tag this
+# branch is based on; see CLAUDE.md on 2.5.316 and 2.5.317, which are not
+# tagged upstream and add no database changes.
+ARG WIKI_VERSION=2.5.315
+# What it was built from, for the image label only. Not shown in the wiki.
+ARG WIKI_BUILD=unknown
+
+# Same edit the official workflow makes with jq, without adding jq.
+RUN node -e "const fs=require('fs'); const p=JSON.parse(fs.readFileSync('package.json','utf8')); p.version=process.env.WIKI_VERSION; p.dev=false; fs.writeFileSync('package.json', JSON.stringify(p, null, 2))" \
+  && node -e "const p=require('./package.json'); console.log('building version', p.version, 'dev =', p.dev)"
+
+RUN yarn cache clean
+RUN yarn --frozen-lockfile --non-interactive
+RUN yarn build
+RUN rm -rf /wiki/node_modules
+RUN yarn --production --frozen-lockfile --non-interactive
+RUN yarn patch-package
+
+# ===============
+# --- Release ---
+# ===============
+FROM node:24-alpine
+
+ARG WIKI_VERSION=2.5.315
+ARG WIKI_BUILD=unknown
+LABEL org.opencontainers.image.title="Wiki.js with the AI assistant"
+LABEL org.opencontainers.image.version="${WIKI_VERSION}"
+LABEL org.opencontainers.image.revision="${WIKI_BUILD}"
+LABEL org.opencontainers.image.source="https://github.com/requarks/wiki"
+LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
+
+RUN apk add bash curl git openssh gnupg sqlite --no-cache && \
+    mkdir -p /wiki && \
+    mkdir -p /logs && \
+    mkdir -p /wiki/data/content && \
+    chown -R node:node /wiki /logs
+
+WORKDIR /wiki
+
+COPY --chown=node:node --from=assets /wiki/assets ./assets
+COPY --chown=node:node --from=assets /wiki/node_modules ./node_modules
+COPY --chown=node:node ./server ./server
+COPY --chown=node:node --from=assets /wiki/server/views ./server/views
+COPY --chown=node:node ./dev/build/config.yml ./config.yml
+# The stamped one, not the one in the repository.
+COPY --chown=node:node --from=assets /wiki/package.json ./package.json
+COPY --chown=node:node ./LICENSE ./LICENSE
+
+USER node
+
+VOLUME ["/wiki/data/content"]
+
+EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD curl -fsS http://localhost:3000/healthz || exit 1
+
+CMD ["node", "--no-deprecation", "server"]

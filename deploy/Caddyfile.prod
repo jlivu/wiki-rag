@@ -1,0 +1,41 @@
+# Production proxy.
+#
+# One origin for the wiki and the assistant, which is what lets the panel
+# sit in an iframe on the wiki's own pages, read the reader's login cookie
+# and use the microphone. Caddy listens inside the container on 80;
+# docker-compose.prod.yml publishes that on 127.0.0.1:8088 only.
+#
+# No TLS: browsers treat localhost as a secure context, so the microphone
+# works without a certificate, and nothing here is reachable off this Mac.
+
+{
+	admin off
+	auto_https off
+	servers {
+		trusted_proxies static private_ranges
+	}
+}
+
+:80 {
+	encode gzip
+
+	# The assistant service. The path is passed through unchanged, so its
+	# routes keep the /ai prefix.
+	handle /ai/* {
+		reverse_proxy ai:4000 {
+			# Answers stream token by token; nothing may buffer them.
+			flush_interval -1
+		}
+	}
+
+	# Everything else is Wiki.js, websockets included.
+	handle {
+		reverse_proxy wiki:3000
+	}
+
+	log {
+		output stdout
+		format console
+		level WARN
+	}
+}

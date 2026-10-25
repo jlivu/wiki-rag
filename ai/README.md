@@ -20,6 +20,7 @@ with `postMessage`, and both sides check the origin.
 | `/ai/health`    | `{ ok, provider: { id, model, label } }`. The panel's status chip shows the label. |
 | `/ai/api/agent` | One AG-UI run, streamed back as server-sent events.               |
 | `/ai/panel/`    | The chat app. Vite's dev server in development, the built files in production. |
+| `/ai/api/pages` | Creates one page, as the reader who pressed the button. |
 | `/ai/api/transcribe` | One recording in, its text out. Dictation only; nothing is stored. |
 | `/ai/mcp`       | MCP over Streamable HTTP, for agents outside the wiki.            |
 
@@ -521,6 +522,84 @@ The module stores nothing and writes no files. It posts
 `{ event, id, path, locale }` and returns immediately: a page save never
 waits for the assistant, and never fails because of it.
 
+## Creating a page from a draft card
+
+When the wiki has no answer, the assistant offers a `draft_page` card: a
+title, a path and a body the reader can edit. Pressing **Create page**
+creates it.
+
+**The model cannot do this.** It has no tool for creating a page in the
+panel, and nothing in an answer can cause a request. A page appears only
+because a person pressed the button.
+
+**It is created as that person.** The request carries their Wiki.js login
+cookie and nothing else — no admin key is in scope on this route — so
+Wiki.js applies their own permissions, exactly as the editor would. A
+reader who is not logged in gets a disabled button reading "Log in to
+create pages".
+
+The page is created **unpublished**, tagged `ai-draft`, in the Markdown
+editor, with a warning block at the top:
+
+```
+> **Draft written by the wiki assistant.** Nothing here has been checked by a person.
+> Read it against the sources, correct what is wrong, delete this note, then publish.
+{.is-warning}
+```
+
+Nothing is visible to anyone else until a person publishes it, and an
+unpublished page is not indexed. Publishing it indexes it within seconds
+(measured: 12, which is the 10-second debounce plus the job).
+
+Afterwards the card turns into its created state with **Open in editor**,
+which opens `/e/{locale}/{path}` in a new tab. That state is kept in
+`sessionStorage`, keyed by the message and the position of the card in it,
+so it survives a reload and the button cannot make a second page. It is
+deliberately *not* kept in the card's own arguments: those come from the
+model and are re-checked from storage on every reload, so a model that
+wrote `created: { editUrl: … }` into a tool call would put a link of its
+own choosing in front of the reader. A stored entry whose links point off
+this origin is thrown away.
+
+### POST /ai/api/pages
+
+| Answer | When |
+| ------ | ---- |
+| `201 { ok: true, page }` | created; `page` carries `editUrl` and `viewUrl` |
+| `400` | the path breaks one of Wiki.js's rules, or a field is missing |
+| `401` | not logged in |
+| `403` | the `Origin` is not the wiki's, or Wiki.js refused this reader |
+| `409` | a page already exists there; the answer carries `existingUrl` |
+| `415` | the body was not JSON |
+| `503` | the wiki did not answer |
+
+Because it writes, the route is stricter than the rest: the body must be
+JSON (a cross-site form post cannot be), the `Origin` header must be the
+wiki's own, and the mutation runs with the reader's token. The log records
+who created what — a short fingerprint of the token, the id, the path and
+the timing — and never the content.
+
+`shared/pages.ts` holds the path rules, so the panel and the service check
+the same ones: the panel can tell the reader what is wrong while they can
+still fix it, and the service checks again because a browser is not where
+a rule is enforced. They are Wiki.js's own rules:
+
+| Refused | Why |
+| ------- | --- |
+| `ops/my page`, `ops/notes.md`, `ops\win`, `ops//x` | `pages.create` rejects spaces, dots, backslashes and empty folders |
+| `"` `\|` `<` `>` `:` `*` `?`, control characters | Wiki.js's `unsafeCharsRegex` |
+| `x/thing` | a one-letter first folder is one of Wiki.js's own routes |
+| `it/manual`, `en/guide` | Wiki.js reads a two-letter first folder as a language code |
+| `login/…`, `img/…`, `js/…`, `svg/…`, `fonts/…` | `reservedPaths` in `server/app/data.yml` |
+
+The last three are the interesting ones: `pages.create` accepts those paths
+happily and the page is then unreachable, because `isReservedPath` is
+checked by the *editor* route and not by the mutation.
+
+The same code creates the page for MCP's `create_draft_page`
+(`src/wiki/pages.ts`), with one difference: an agent always writes under
+`drafts/`, while a person may choose the path.
+
 ## Dictation
 
 The composer has a microphone button with a chevron beside it. The button
@@ -760,6 +839,18 @@ Admin > Search Engine decides what `search_wiki` can find.
 
 Switch to **Database - PostgreSQL** in Admin > Search Engine, press Apply,
 then **Rebuild Index**. Nothing else in the assistant has to change.
+
+## Running it in production
+
+Everything above describes development: `tsx watch`, Vite's dev server,
+`ai/.env`, and the proxy on `127.0.0.1:3080`.
+
+Production is a separate stack in [`deploy/`](../deploy/README.md) —
+its own containers, wiki database, index, settings file and API keys, on
+`http://localhost:8088`, with the chat app served as built files by this
+service rather than by Vite. The two run side by side and share only
+Ollama and whisper.cpp. `deploy/SWITCHOVER.md` is the plan for moving the
+installed wiki onto it.
 
 ## The protocol
 

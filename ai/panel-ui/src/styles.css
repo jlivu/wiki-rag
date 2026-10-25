@@ -678,14 +678,71 @@ pre,
   margin-top: 11px;
   padding: 0 15px;
   height: 33px;
-  border: 1px solid var(--border-strong);
+  border: 0;
   border-radius: 7px;
-  background-color: var(--surface);
-  color: var(--text-3);
+  background-color: var(--primary);
+  color: var(--primary-text);
   font-family: inherit;
   font-size: 12.5px;
-  font-weight: 500;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.12s;
+}
+
+.draft-create:hover:not(:disabled) { filter: brightness(1.1); }
+
+.draft-create:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.draft-create:disabled {
+  background-color: var(--border-strong);
+  color: var(--text-3);
   cursor: not-allowed;
+}
+
+/* The created state: a link that looks like the button it replaces. */
+.draft-open {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  text-decoration: none;
+}
+
+.draft-done {
+  margin: 0 0 4px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
+.draft-done code,
+.draft-note code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background-color: var(--code-bg);
+  font-size: 11.5px;
+}
+
+.draft-error {
+  margin: 9px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--danger);
+}
+
+.draft-error a {
+  color: var(--danger);
+  text-decoration: underline;
+}
+
+.draft-note {
+  margin: 9px 0 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-3);
 }
 
 /* ─── composer ───────────────────────────────────────────────────── */

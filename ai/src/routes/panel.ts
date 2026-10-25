@@ -31,7 +31,13 @@ export const panelRoutes: FastifyPluginAsync = async (app) => {
     // Only the wiki, on this same origin, may frame the panel.
     reply.header('content-security-policy', "frame-ancestors 'self'")
     if (isHtmlPath(request.url)) {
+      // The page itself names the current build's files, so it must never
+      // be held: a stale copy would load assets that no longer exist.
       reply.header('cache-control', 'no-store')
+    } else if (isHashedAsset(request.url)) {
+      // Vite puts a content hash in every built file name, so a given URL
+      // never changes. A year, and never revalidated.
+      reply.header('cache-control', 'public, max-age=31536000, immutable')
     }
   })
 
@@ -53,6 +59,16 @@ export const panelRoutes: FastifyPluginAsync = async (app) => {
 function queryStringOf (url: string | undefined): string {
   const start = url?.indexOf('?') ?? -1
   return start >= 0 ? (url as string).slice(start) : ''
+}
+
+/**
+ * A built file with a content hash in its name, e.g.
+ * /ai/panel/assets/index-Bz42JpH5.js. Vite writes every one of these; a
+ * file without a hash is served normally and revalidated.
+ */
+function isHashedAsset (url: string): boolean {
+  const [path = ''] = url.split('?')
+  return /\/assets\/[^/]+-[A-Za-z0-9_-]{8,}\.[a-z0-9]+$/.test(path)
 }
 
 /** A directory listing or an .html file, i.e. the page itself. */

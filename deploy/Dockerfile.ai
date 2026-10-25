@@ -1,0 +1,80 @@
+# The AI service, with the chat app built into it.
+#
+# In development the chat app runs on its own Vite server and the proxy
+# sends /ai/panel* there. In production there is no Vite: the service
+# serves panel-ui/dist itself, which is why the panel is built here and
+# copied in beside the compiled service.
+#
+# Build from the repository root:
+#   docker build -f deploy/Dockerfile.ai -t wiki-rag/ai:<tag> .
+
+# ========================
+# --- Build the panel ---
+# ========================
+FROM node:22.23.4-bookworm-slim AS panel
+
+WORKDIR /build
+COPY ai/panel-ui/package.json ai/panel-ui/package-lock.json* ./panel-ui/
+RUN cd panel-ui && npm ci
+
+# The panel imports ai/shared, so that has to be in place before the build.
+COPY ai/shared ./shared
+COPY ai/panel-ui ./panel-ui
+RUN cd panel-ui && npm run build
+
+# ==========================
+# --- Build the service ---
+# ==========================
+FROM node:22.23.4-bookworm-slim AS service
+
+WORKDIR /build
+COPY ai/package.json ai/package-lock.json* ./
+RUN npm ci
+COPY ai/tsconfig.json ./
+COPY ai/src ./src
+COPY ai/shared ./shared
+RUN npm run build
+
+# ===============
+# --- Release ---
+# ===============
+FROM node:22.23.4-bookworm-slim
+
+ARG AI_BUILD=unknown
+LABEL org.opencontainers.image.title="Wiki.js AI assistant service"
+LABEL org.opencontainers.image.revision="${AI_BUILD}"
+LABEL org.opencontainers.image.licenses="AGPL-3.0-only"
+
+ENV NODE_ENV=production
+WORKDIR /app
+
+# Tesseract reads the text in images and in scanned PDF pages; poppler
+# renders a PDF page for it and counts the pages. See ai/README.md.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      tesseract-ocr \
+      tesseract-ocr-eng \
+      poppler-utils \
+      curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# Runtime dependencies only: no tsx, no typescript, no test tooling.
+COPY ai/package.json ai/package-lock.json* ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+# The compiled service keeps its source layout, so dist/src/server.js is
+# the entry point and dist/shared sits beside it, as the imports expect.
+COPY --from=service /build/dist ./dist
+# Where routes/panel.ts looks: <cwd>/panel-ui/dist.
+COPY --from=panel /build/panel-ui/dist ./panel-ui/dist
+
+# A service that writes nothing to disk has no reason to run as root.
+RUN chown -R node:node /app
+USER node
+
+EXPOSE 4000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+  CMD curl -fsS http://localhost:4000/ai/health || exit 1
+
+CMD ["node", "dist/src/server.js"]

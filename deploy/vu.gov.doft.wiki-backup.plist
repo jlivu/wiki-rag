@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Daily backup of the production wiki database.
+
+  Install:
+    cp deploy/vu.gov.doft.wiki-backup.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/vu.gov.doft.wiki-backup.plist
+
+  Edit the path below if the repository is not at
+  /Users/joelivu/Workspaces/Wiki/wiki-rag.
+
+  It runs at 02:10 every day. A Mac that is asleep then runs it at the
+  next wake, because RunAtLoad is off and launchd catches up missed
+  calendar intervals once the machine is awake.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>vu.gov.doft.wiki-backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/joelivu/Workspaces/Wiki/wiki-rag/deploy/backup.sh</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key><integer>2</integer>
+    <key>Minute</key><integer>10</integer>
+  </dict>
+  <!-- docker lives here; launchd's PATH is minimal. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/joelivu/Backups/wiki-rag/backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/joelivu/Backups/wiki-rag/backup.log</string>
+</dict>
+</plist>

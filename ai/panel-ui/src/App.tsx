@@ -8,6 +8,7 @@ import { MessageFeed } from './components/MessageFeed'
 import { createAgent } from './lib/agent'
 import type { PanelParams } from './lib/params'
 import { postStatus } from './lib/parent'
+import { forgetCreatedPages } from './lib/created-pages'
 import { clearThread, loadThread, newThreadId, saveThread } from './lib/storage'
 import { textMessage, type ChatMessage, type MessagePart } from './types'
 
@@ -24,6 +25,8 @@ export default function App ({ params }: { params: PanelParams }) {
   const [online, setOnline] = useState<boolean | null>(null)
   const [statusLabel, setStatusLabel] = useState<string | undefined>(undefined)
   const [speech, setSpeech] = useState<HealthResponse['speech'] | undefined>(undefined)
+  // Whether the browser carries a wiki login, for the draft card's button.
+  const [signedIn, setSignedIn] = useState(false)
   const [announcement, setAnnouncement] = useState('')
   const [focusToken, setFocusToken] = useState(0)
 
@@ -60,6 +63,7 @@ export default function App ({ params }: { params: PanelParams }) {
         setStatusLabel(body.provider?.label)
         // No speech service, no microphone button.
         setSpeech(body.speech)
+        setSignedIn(body.signedIn === true)
         setOnline(body.ok === true)
       })
       .catch(() => { if (!cancelled) { setOnline(false) } })
@@ -77,6 +81,7 @@ export default function App ({ params }: { params: PanelParams }) {
     const nextId = newThreadId()
     const fresh = [greeting(params.page)]
     clearThread()
+    forgetCreatedPages()
     setThreadId(nextId)
     setMessages(fresh)
     agentRef.current = createAgent(nextId, fresh)
@@ -220,7 +225,7 @@ export default function App ({ params }: { params: PanelParams }) {
 
   return (
     <div className="panel">
-      <MessageFeed messages={messages} locale={params.page.locale} />
+      <MessageFeed messages={messages} locale={params.page.locale} signedIn={signedIn} />
       <Composer
         busy={busy}
         focusToken={focusToken}

@@ -1,0 +1,8 @@
+# Production settings and secrets. The template with no values in it,
+# .env.prod.example, is committed; this one never is.
+.env.prod
+.env.prod.*
+!.env.prod.example
+
+# What build.sh writes down about the last build.
+build.log

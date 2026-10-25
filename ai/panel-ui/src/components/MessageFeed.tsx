@@ -3,9 +3,10 @@ import { useEffect, useRef } from 'react'
 import type { ChatMessage } from '../types'
 import { MessageBubble } from './MessageBubble'
 
-export function MessageFeed ({ messages, locale }: {
+export function MessageFeed ({ messages, locale, signedIn }: {
   messages: ChatMessage[]
   locale: string
+  signedIn: boolean
 }) {
   const feed = useRef<HTMLDivElement>(null)
   // Follow the newest message, unless the reader has scrolled up to read.
@@ -30,7 +31,7 @@ export function MessageFeed ({ messages, locale }: {
       }}
     >
       {messages.map(message => (
-        <MessageBubble key={message.id} message={message} locale={locale} />
+        <MessageBubble key={message.id} message={message} locale={locale} signedIn={signedIn} />
       ))}
     </div>
   )

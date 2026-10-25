@@ -1,14 +1,17 @@
 import type { Source } from '@shared'
 
+import { cardKey } from '../lib/created-pages'
 import type { ChatMessage } from '../types'
 import { messageText } from '../types'
 import { AnswerComponent } from './cards'
 import { Markdown } from './Markdown'
 import { TypingDots } from './TypingDots'
 
-export function MessageBubble ({ message, locale }: {
+export function MessageBubble ({ message, locale, signedIn }: {
   message: ChatMessage
   locale: string
+  /** Passed to the draft card, which can only create a page for a reader. */
+  signedIn: boolean
 }) {
   const isUser = message.role === 'user'
   const bubbleClass = ['bub', message.status === 'error' ? 'bub-error' : null]
@@ -30,7 +33,15 @@ export function MessageBubble ({ message, locale }: {
                   ? (part.text.length > 0
                       ? <Markdown key={index} text={part.text} sources={sources} locale={locale} />
                       : null)
-                  : <AnswerComponent key={index} component={part.component} locale={locale} />
+                  : (
+                    <AnswerComponent
+                      key={index}
+                      component={part.component}
+                      locale={locale}
+                      signedIn={signedIn}
+                      cardKey={cardKey(message.id, index)}
+                    />
+                    )
               ))}
           {message.status === 'streaming' ? <TypingDots /> : null}
         </div>

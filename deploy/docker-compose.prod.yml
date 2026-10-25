@@ -1,0 +1,159 @@
+# -- PRODUCTION --
+#
+# The whole thing: Wiki.js, its database, the AI service, the index, and a
+# proxy that puts the first two on one origin.
+#
+# This Mac is the only machine that uses it, so every published port binds
+# to 127.0.0.1 and nothing is reachable from the network. Caddy publishes
+# 8088; no database port is published at all. Ollama and whisper.cpp run
+# natively on the Mac — shared with development — and are reached through
+# host.docker.internal, which Docker Desktop forwards to the Mac's
+# loopback.
+#
+#   cd deploy
+#   docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
+#
+# Settings live in deploy/.env.prod, which is gitignored. See
+# .env.prod.example and README.md.
+
+name: wiki-rag-prod
+
+services:
+  # ── the wiki's database ────────────────────────────────────────────
+  #
+  # By default this is the volume the installed wiki already uses, so
+  # production carries on with the pages, assets and users that are
+  # already there. Uploaded files live in this database too, which is why
+  # the backup script only has to dump it.
+  db:
+    container_name: wiki-prod-db
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${WIKI_DB_NAME:-wiki}
+      POSTGRES_USER: ${WIKI_DB_USER:-wikijs}
+      POSTGRES_PASSWORD: ${WIKI_DB_PASS:?set WIKI_DB_PASS in .env.prod}
+    # No ports: nothing outside this network talks to it.
+    expose:
+      - "5432"
+    volumes:
+      - wiki-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${WIKI_DB_USER:-wikijs} -d ${WIKI_DB_NAME:-wiki}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── Wiki.js, built from this branch ────────────────────────────────
+  wiki:
+    container_name: wiki-prod
+    image: ${WIKI_IMAGE:-wiki-rag/wiki:latest}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_TYPE: postgres
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_USER: ${WIKI_DB_USER:-wikijs}
+      DB_PASS: ${WIKI_DB_PASS:?set WIKI_DB_PASS in .env.prod}
+      DB_NAME: ${WIKI_DB_NAME:-wiki}
+    expose:
+      - "3000"
+    volumes:
+      - wiki-data:/wiki/data
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── the index: pages, documents and images, with their embeddings ──
+  #
+  # Rebuildable from the wiki at any time, so it is deliberately not
+  # backed up.
+  ai-db:
+    container_name: wiki-prod-ai-db
+    image: pgvector/pgvector:0.8.7-pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${INDEX_DB_NAME:-wiki_ai}
+      POSTGRES_USER: ${INDEX_DB_USER:-wiki_ai}
+      POSTGRES_PASSWORD: ${INDEX_DB_PASS:?set INDEX_DB_PASS in .env.prod}
+    expose:
+      - "5432"
+    volumes:
+      - ai-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${INDEX_DB_USER:-wiki_ai} -d ${INDEX_DB_NAME:-wiki_ai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── the assistant: API, indexer, MCP, and the chat app's files ─────
+  ai:
+    container_name: wiki-prod-ai
+    image: ${AI_IMAGE:-wiki-rag/ai:latest}
+    restart: unless-stopped
+    depends_on:
+      ai-db:
+        condition: service_healthy
+    env_file:
+      - path: .env.prod
+        required: true
+    environment:
+      HOST: 0.0.0.0
+      PORT: "4000"
+      NODE_ENV: production
+      # Inside the network; the browser never uses this address.
+      WIKI_URL: http://wiki:3000
+      INDEX_DB_URL: postgres://${INDEX_DB_USER:-wiki_ai}:${INDEX_DB_PASS}@ai-db:5432/${INDEX_DB_NAME:-wiki_ai}
+      # Ollama and whisper.cpp run natively on the Mac, loopback only.
+      OLLAMA_URL: http://host.docker.internal:11434
+      STT_URL: http://host.docker.internal:8178
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    expose:
+      - "4000"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── one origin for both ────────────────────────────────────────────
+  caddy:
+    container_name: wiki-prod-proxy
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - wiki
+      - ai
+    # 127.0.0.1 only: this wiki is used from this Mac and nowhere else.
+    ports:
+      - "127.0.0.1:${PROD_PORT:-8088}:80"
+    volumes:
+      - ./Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  # The installed wiki's own volumes by default, so production picks up
+  # its data. Override the names in .env.prod to run against a copy.
+  wiki-db-data:
+    external: true
+    name: ${WIKI_DB_VOLUME:-wikijs_db-data}
+  wiki-data:
+    external: true
+    name: ${WIKI_DATA_VOLUME:-wikijs_wiki-data}
+  # Ours, created on first start.
+  ai-db-data:
+    name: ${INDEX_DB_VOLUME:-wiki-rag-prod-index}
+  caddy-data:
+  caddy-config:
