@@ -9,6 +9,8 @@ export const HEALTH_PATH = '/ai/health'
 export const AGENT_PATH = '/ai/api/agent'
 /** The chat app. Trailing slash: it is a directory of static files. */
 export const PANEL_PATH = '/ai/panel/'
+/** MCP over Streamable HTTP, for agents outside the wiki. */
+export const MCP_PATH = '/ai/mcp'
 
 /**
  * Extra fields on an AG-UI run. `page` is the wiki page the reader is on, so

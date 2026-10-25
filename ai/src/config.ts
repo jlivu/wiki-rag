@@ -32,6 +32,18 @@ export interface IndexConfig {
   reconcileMinutes: number
   /** Reads page source as an admin. Without it the indexer stays off. */
   wikiApiKey: string
+  /** The wiki's own locale, used when a caller does not say. */
+  defaultLocale: string
+}
+
+/** The MCP server for outside agents. */
+export interface McpConfig {
+  /** Tool calls per key per minute. */
+  rateLimitPerMinute: number
+  /** Host header values accepted, against DNS rebinding. */
+  allowedHosts: string[]
+  /** Origin header values accepted when one is sent. */
+  allowedOrigins: string[]
 }
 
 export interface Config {
@@ -39,6 +51,9 @@ export interface Config {
   port: number
   logLevel: string
   wikiUrl: string
+  /** Where a person opens the wiki, for URLs an agent can cite. */
+  wikiPublicUrl: string
+  mcp: McpConfig
   llm: LlmConfig
   index: IndexConfig
 }
@@ -58,6 +73,16 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
     port: readInt(env.PORT, 4000),
     logLevel: env.LOG_LEVEL ?? 'info',
     wikiUrl: trimSlash(env.WIKI_URL ?? 'http://wiki-app:3000'),
+    wikiPublicUrl: trimSlash(env.WIKI_PUBLIC_URL ?? 'http://127.0.0.1:3080'),
+    mcp: {
+      rateLimitPerMinute: readInt(env.MCP_RATE_LIMIT_PER_MINUTE, 60),
+      allowedHosts: readList(env.MCP_ALLOWED_HOSTS) ?? [
+        '127.0.0.1:3080', 'localhost:3080', '[::1]:3080', 'ai:4000', '127.0.0.1:4000', 'localhost:4000'
+      ],
+      allowedOrigins: readList(env.MCP_ALLOWED_ORIGINS) ?? [
+        'http://127.0.0.1:3080', 'http://localhost:3080'
+      ]
+    },
     llm: {
       provider,
       model: nonEmpty(env.LLM_MODEL) ?? DEFAULT_MODELS[provider],
@@ -75,7 +100,8 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
       embedModel: nonEmpty(env.EMBED_MODEL) ?? 'nomic-embed-text',
       debounceSeconds: readInt(env.INDEX_DEBOUNCE_SECONDS, 10),
       reconcileMinutes: readInt(env.RECONCILE_MINUTES, 30),
-      wikiApiKey: env.WIKI_API_KEY ?? ''
+      wikiApiKey: env.WIKI_API_KEY ?? '',
+      defaultLocale: nonEmpty(env.WIKI_LOCALE) ?? 'en'
     }
   }
 }
@@ -94,7 +120,9 @@ export function describeConfig (config: Config): Record<string, unknown> {
     embedModel: config.index.embedModel,
     debounceSeconds: config.index.debounceSeconds,
     reconcileMinutes: config.index.reconcileMinutes,
-    hasWikiApiKey: config.index.wikiApiKey.length > 0
+    hasWikiApiKey: config.index.wikiApiKey.length > 0,
+    wikiPublicUrl: config.wikiPublicUrl,
+    mcpRateLimitPerMinute: config.mcp.rateLimitPerMinute
   }
 }
 
@@ -108,6 +136,11 @@ function readEffort (value: string | undefined): Effort {
   const name = (value ?? 'medium').trim().toLowerCase() as Effort
   if (EFFORTS.includes(name)) { return name }
   throw new Error(`LLM_EFFORT must be one of ${EFFORTS.join(', ')} (got "${value}")`)
+}
+
+function readList (value: string | undefined): string[] | undefined {
+  const items = (value ?? '').split(',').map(item => item.trim()).filter(item => item.length > 0)
+  return items.length > 0 ? items : undefined
 }
 
 function readBool (value: string | undefined, fallback: boolean): boolean {

@@ -20,6 +20,7 @@ with `postMessage`, and both sides check the origin.
 | `/ai/health`    | `{ ok, provider: { id, model, label } }`. The panel's status chip shows the label. |
 | `/ai/api/agent` | One AG-UI run, streamed back as server-sent events.               |
 | `/ai/panel/`    | The chat app. Vite's dev server in development, the built files in production. |
+| `/ai/mcp`       | MCP over Streamable HTTP, for agents outside the wiki.            |
 
 ## Start it
 
@@ -108,6 +109,10 @@ with no values; copy what you need.
 | `LLM_EFFORT`        | `medium`                           | Anthropic only: `low` to `max`. Higher costs more and takes longer. |
 | `LLM_TIMEOUT_MS`    | `120000`                           | Give up on a model that has stopped responding. |
 | `LLM_PROMPT_CACHE`  | `true`                             | Anthropic prompt caching. Set to `0` to measure its effect. |
+| `WIKI_PUBLIC_URL`   | `http://127.0.0.1:3080`            | Where a person opens the wiki, for the URLs agents cite. |
+| `MCP_RATE_LIMIT_PER_MINUTE` | `60`                       | Requests allowed per API key per minute. |
+| `MCP_ALLOWED_HOSTS` | the dev hosts                      | `Host` values the MCP endpoint accepts. |
+| `MCP_ALLOWED_ORIGINS` | the dev origins                  | `Origin` values accepted when one is sent. |
 | `WIKI_URL`          | `http://wiki-app:3000`             | Where Wiki.js answers, from inside the Docker network. |
 | `WIKI_API_KEY`      | —                                  | Reads page source as an administrator, for the indexer. Without it the indexer stays off. |
 | `EMBED_MODEL`       | `nomic-embed-text`                 | Pulled in Ollama. Changing it re-embeds every page. |
@@ -299,6 +304,139 @@ it supports — and the sync schedule defaults to every 30 minutes.
 The module stores nothing and writes no files. It posts
 `{ event, id, path, locale }` and returns immediately: a page save never
 waits for the assistant, and never fails because of it.
+
+## MCP: the wiki as a tool for agents
+
+`POST /ai/mcp` speaks MCP over Streamable HTTP, built on the official
+TypeScript SDK (`@modelcontextprotocol/sdk`). It is reachable through the
+proxy, so an agent on this Mac connects to
+`http://127.0.0.1:3080/ai/mcp`.
+
+Four tools, described for an agent rather than a person. Each result carries
+the page's URL, so an agent can cite what it used.
+
+| Tool | What it does |
+| ---- | ------------ |
+| `search_wiki(query, limit?)` | The same hybrid index search the panel uses, with snippets. |
+| `get_page(path, locale?)` | One page as Markdown, with title, path, URL and last-updated date; a very long page is cut and says so. |
+| `list_pages(prefix?, limit?)` | Titles and paths for browsing. |
+| `create_draft_page(title, path, content, description?)` | Files an unpublished page under `drafts/`, tagged `ai-draft`, for a person to review. |
+
+Nothing here is new logic: search goes through the same `Retriever`, reading
+a page through the same `WikiClient`, and a draft through Wiki.js's own
+`pages.create`.
+
+### Authentication and what a key can see
+
+Every request needs `Authorization: Bearer <Wiki.js API key>`. A missing or
+rejected key gets a `401`; the key is validated against Wiki.js and the
+answer cached for a minute.
+
+**Every read runs with that key's own permissions**, exactly as the panel
+reads as a signed-in reader. A key scoped to a group sees only what that
+group can read: `search_wiki` filters its candidates page by page before any
+snippet is built, `get_page` refuses a page the key cannot open, and
+`list_pages` walks Wiki.js's own page tree, which Wiki.js filters itself.
+`create_draft_page` is Wiki.js's decision too — the key needs `write:pages`
+under `drafts/`.
+
+Keys and page content are never logged. Each tool call logs the tool name, a
+ten-character fingerprint of the key, how long it took and how many
+characters came back:
+
+```
+docker logs wiki-ai | grep 'mcp tool call'
+```
+
+There is a per-key limit of `MCP_RATE_LIMIT_PER_MINUTE` requests a minute
+(60 by default); over it the server answers `429` with `Retry-After`.
+
+`Origin` and `Host` are checked before anything else, against DNS rebinding.
+The SDK's own `allowedHosts`/`allowedOrigins` options are deprecated in
+1.32.2 in favour of external middleware, so the check lives in
+`src/routes/mcp.ts` and reads `MCP_ALLOWED_HOSTS` and
+`MCP_ALLOWED_ORIGINS`. An absent `Origin` is allowed: agents are not
+browsers.
+
+### Making a group and a key for agents
+
+In the wiki's admin area:
+
+1. **Administration > Groups > New Group** — call it something like
+   *AI agents*. Give it `read:pages` (and `write:pages` if agents should be
+   able to file drafts). Under **Page Rules**, allow `read:pages` on
+   everything, then add a **deny** rule for anything agents must not see.
+2. **Administration > API** — turn the API on if it is off, then
+   **New API Key**. Name it after the agent, set an expiry, leave
+   **Full Access** off and pick the group from step 1. **Copy the key now**;
+   the wiki never shows it again.
+3. Put the key in a file only you can read, outside this repository:
+
+   ```sh
+   mkdir -p ~/.config/wiki-ai && chmod 700 ~/.config/wiki-ai
+   printf '%s' 'PASTE_THE_KEY_HERE' > ~/.config/wiki-ai/mcp-key
+   chmod 600 ~/.config/wiki-ai/mcp-key
+   ```
+
+A key with Full Access would let an agent read everything, drafts and
+restricted pages included. Scope it to a group.
+
+### Connecting a client
+
+**Claude Code** — at user scope, so it is available in every project. The
+key is read from the file, so it never enters your shell history:
+
+```sh
+claude mcp add --scope user --transport http wiki-rag   http://127.0.0.1:3080/ai/mcp   --header "Authorization: Bearer $(cat ~/.config/wiki-ai/mcp-key)"
+```
+
+Check it with `claude mcp list`; remove it with
+`claude mcp remove --scope user wiki-rag`. Claude Code stores the resolved
+header in `~/.claude.json`, which is outside the repository — keep that file
+private.
+
+**Claude Desktop** has no HTTP transport of its own, so it goes through
+`mcp-remote`. In *Settings > Developer > Edit Config*:
+
+```json
+{
+  "mcpServers": {
+    "wiki-rag": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote", "http://127.0.0.1:3080/ai/mcp",
+        "--header", "Authorization:${WIKI_MCP_KEY}"
+      ],
+      "env": { "WIKI_MCP_KEY": "Bearer PASTE_THE_KEY_HERE" }
+    }
+  }
+}
+```
+
+The header value goes in `env` because `mcp-remote` does not split an
+argument containing a space; `Authorization:${WIKI_MCP_KEY}` has none.
+
+**Cursor** — *Settings > MCP > Add new global MCP server*, or
+`~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "wiki-rag": {
+      "url": "http://127.0.0.1:3080/ai/mcp",
+      "headers": { "Authorization": "Bearer PASTE_THE_KEY_HERE" }
+    }
+  }
+}
+```
+
+### What an agent should do with it
+
+The server sends instructions along with the tool list: search before
+answering, read a page before quoting it, cite by URL, and remember that a
+missing page may simply be one this key cannot read. Drafts are the one
+write: they land unpublished, out of the wiki and out of the index, until a
+person publishes them.
 
 ## The search engine matters
 

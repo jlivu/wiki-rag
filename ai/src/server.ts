@@ -2,6 +2,7 @@ import Fastify from 'fastify'
 
 import { agentRoutes } from './routes/agent.js'
 import { internalRoutes } from './routes/internal.js'
+import { mcpRoutes } from './routes/mcp.js'
 import { panelRoutes } from './routes/panel.js'
 import { describeConfig, loadConfig } from './config.js'
 import { Indexer } from './indexer/indexer.js'
@@ -34,6 +35,7 @@ const indexer = new Indexer(config, app.log)
 
 await app.register(agentRoutes(config, indexer))
 await app.register(internalRoutes(indexer))
+await app.register(mcpRoutes(config, indexer))
 await app.register(panelRoutes)
 
 // Let tsx watch and `docker compose` restarts free the port cleanly.
