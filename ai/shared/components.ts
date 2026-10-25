@@ -99,6 +99,113 @@ export type PanelComponentResult =
   | { ok: true, component: PanelComponent }
   | { ok: false, error: string }
 
+/* ── the same shapes, as JSON Schema for a model ───────────────────── */
+
+const PAGE_LINK_PROPERTIES = {
+  title: { type: 'string', description: 'The page title, as it appears in the wiki.' },
+  path: { type: 'string', description: 'The page path without the locale, e.g. "ops/backup-and-restore".' },
+  locale: { type: 'string', description: 'Locale code. Defaults to the current page\'s locale.' }
+} as const
+
+/**
+ * What the agent is told each component takes. Kept beside the readers above
+ * so the two cannot drift: a tool call that satisfies the schema also passes
+ * parsePanelComponent.
+ */
+export const PANEL_TOOL_SCHEMAS: Record<PanelToolName, Record<string, unknown>> = {
+  sources: {
+    type: 'object',
+    description: 'Lists the wiki pages an answer came from.',
+    properties: {
+      items: {
+        type: 'array',
+        minItems: 1,
+        description: 'One entry per page actually used, most relevant first.',
+        items: {
+          type: 'object',
+          properties: {
+            ...PAGE_LINK_PROPERTIES,
+            snippet: { type: 'string', description: 'A sentence or two from the page showing why it is relevant. Quote the page; do not invent it.' },
+            updatedAt: { type: 'string', description: 'When the page was last updated, ISO 8601, if known.' }
+          },
+          required: ['title', 'path', 'snippet'],
+          additionalProperties: false
+        }
+      }
+    },
+    required: ['items'],
+    additionalProperties: false
+  },
+  checklist: {
+    type: 'object',
+    description: 'A procedure as numbered steps. Use it whenever the answer is "do this, then this".',
+    properties: {
+      title: { type: 'string', description: 'What the procedure achieves.' },
+      steps: {
+        type: 'array',
+        minItems: 1,
+        items: {
+          type: 'object',
+          properties: {
+            text: { type: 'string', description: 'One step. Markdown emphasis is allowed.' },
+            code: { type: 'string', description: 'A command or snippet for this step, copied exactly from the page.' }
+          },
+          required: ['text'],
+          additionalProperties: false
+        }
+      }
+    },
+    required: ['steps'],
+    additionalProperties: false
+  },
+  known_issue: {
+    type: 'object',
+    description: 'A known error and its fix. Use it when the question names an error, a code or a failure.',
+    properties: {
+      title: { type: 'string', description: 'The error, as the reader would recognise it.' },
+      symptoms: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'What the reader sees.' },
+      rootCause: { type: 'string', description: 'Why it happens, according to the wiki.' },
+      fix: { type: 'string', description: 'What to do about it.' },
+      affectedVersions: { type: 'array', items: { type: 'string' }, description: 'Versions or environments affected, if the page says.' },
+      source: {
+        type: 'object',
+        description: 'The page this came from.',
+        properties: PAGE_LINK_PROPERTIES,
+        required: ['title', 'path'],
+        additionalProperties: false
+      }
+    },
+    required: ['title', 'symptoms', 'rootCause', 'fix'],
+    additionalProperties: false
+  },
+  table: {
+    type: 'object',
+    description: 'A comparison or a short set of facts in rows and columns.',
+    properties: {
+      title: { type: 'string' },
+      columns: { type: 'array', minItems: 1, items: { type: 'string' } },
+      rows: {
+        type: 'array',
+        items: { type: 'array', items: { type: 'string' } },
+        description: 'One array of cells per row, in the same order as the columns.'
+      }
+    },
+    required: ['columns', 'rows'],
+    additionalProperties: false
+  },
+  draft_page: {
+    type: 'object',
+    description: 'A draft of a page that does not exist yet. Offer it when the wiki has no answer.',
+    properties: {
+      title: { type: 'string' },
+      path: { type: 'string', description: 'A suggested path without the locale, lower case with hyphens.' },
+      body: { type: 'string', description: 'The page body in Markdown.' }
+    },
+    required: ['title', 'path', 'body'],
+    additionalProperties: false
+  }
+}
+
 /* ── reading one tool call ─────────────────────────────────────────── */
 
 /** Check a tool call against its shape before anything is drawn. */

@@ -2,22 +2,32 @@ import Fastify from 'fastify'
 
 import { agentRoutes } from './routes/agent.js'
 import { panelRoutes } from './routes/panel.js'
-import { HEALTH_PATH } from '../shared/index.js'
+import { describeConfig, loadConfig } from './config.js'
+import { providerLabel } from './providers/index.js'
+import { HEALTH_PATH, type HealthResponse } from '../shared/index.js'
 
 // A reverse proxy puts this service and the wiki on one origin and sends
 // /ai/* here with the path unchanged, so every route keeps the /ai prefix.
-const HOST = process.env.HOST ?? '0.0.0.0'
-const PORT = Number(process.env.PORT ?? 4000)
+const config = loadConfig()
 
 const app = Fastify({
-  logger: { level: process.env.LOG_LEVEL ?? 'info' }
+  logger: { level: config.logLevel }
 })
 
-app.get(HEALTH_PATH, async () => {
-  return { ok: true }
+app.log.info(describeConfig(config), 'assistant configuration')
+
+app.get(HEALTH_PATH, async (): Promise<HealthResponse> => {
+  return {
+    ok: true,
+    provider: {
+      id: config.llm.provider,
+      model: config.llm.model,
+      label: providerLabel(config)
+    }
+  }
 })
 
-await app.register(agentRoutes)
+await app.register(agentRoutes(config))
 await app.register(panelRoutes)
 
 // Let tsx watch and `docker compose` restarts free the port cleanly.
@@ -31,7 +41,7 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 }
 
 try {
-  await app.listen({ host: HOST, port: PORT })
+  await app.listen({ host: config.host, port: config.port })
 } catch (err) {
   app.log.error(err)
   process.exit(1)

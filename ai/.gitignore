@@ -3,3 +3,5 @@ dist/
 *.log
 .env
 .env.*
+# …but the template, with no values in it, is committed.
+!.env.example

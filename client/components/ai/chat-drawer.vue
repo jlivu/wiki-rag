@@ -17,17 +17,29 @@
           .ai-chat-panel-status(:class='{ "is-online": status.online }')
             span.ai-chat-panel-status-dot
             span {{status.label}}
-          button.ai-chat-panel-close(
-            ref='closeBtn'
-            type='button'
-            @click='closePanel'
-            aria-label='Close assistant'
-            title='Close assistant panel'
-            )
-            svg(width='15', height='15', viewBox='0 0 16 16', fill='none', stroke='currentColor', stroke-width='1.6', aria-hidden='true')
-              rect(x='1', y='2', width='14', height='12', rx='2')
-              line(x1='10', y1='2', x2='10', y2='14')
-              polyline(points='12,6 14,8 12,10')
+          .ai-chat-panel-actions
+            button.ai-chat-panel-action(
+              type='button'
+              @click='startNewChat'
+              :disabled='!canStartNewChat'
+              aria-label='New chat'
+              title='New chat'
+              )
+              svg(width='15', height='15', viewBox='0 0 16 16', fill='none', stroke='currentColor', stroke-width='1.6', stroke-linecap='round', stroke-linejoin='round', aria-hidden='true')
+                path(d='M14 8.4v3.1a1 1 0 0 1-1 1H9.2L6 14.9V12.5H3a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1h5.1')
+                line(x1='12.6', y1='1.6', x2='12.6', y2='6')
+                line(x1='10.4', y1='3.8', x2='14.8', y2='3.8')
+            button.ai-chat-panel-action(
+              ref='closeBtn'
+              type='button'
+              @click='closePanel'
+              aria-label='Close assistant'
+              title='Close assistant panel'
+              )
+              svg(width='15', height='15', viewBox='0 0 16 16', fill='none', stroke='currentColor', stroke-width='1.6', aria-hidden='true')
+                rect(x='1', y='2', width='14', height='12', rx='2')
+                line(x1='10', y1='2', x2='10', y2='14')
+                polyline(points='12,6 14,8 12,10')
         .ai-chat-panel-body
           iframe.ai-chat-panel-frame(
             v-if='panelUrl && hasOpened'
@@ -120,6 +132,9 @@ export default {
     },
     launcherLabel () {
       return this.unreadCount > 0 ? `Open assistant (${this.unreadCount} unread)` : 'Open assistant'
+    },
+    canStartNewChat () {
+      return Boolean(this.panelUrl && this.hasOpened)
     }
   },
   watch: {
@@ -163,6 +178,14 @@ export default {
           this.$refs.closeBtn.focus()
         }
       })
+    },
+    // The chat app clears the conversation itself; it owns that state.
+    startNewChat () {
+      const frame = this.$refs.frame
+      if (!frame || !frame.contentWindow || !this.panelOrigin) {
+        return
+      }
+      frame.contentWindow.postMessage({ type: 'wiki-ai:new-chat' }, this.panelOrigin)
     },
     closePanel () {
       this.panelOpen = false
@@ -291,14 +314,21 @@ $ai-header-border: rgba(255, 255, 255, 0.12);
     }
   }
 
-  &-close {
+  &-actions {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+  }
+
+  &-action {
     flex-shrink: 0;
     display: flex;
     align-items: center;
     justify-content: center;
     width: 32px;
     height: 32px;
-    margin-left: auto;
     border: 1px solid $ai-header-border;
     border-radius: 8px;
     background: transparent;
@@ -306,7 +336,7 @@ $ai-header-border: rgba(255, 255, 255, 0.12);
     cursor: pointer;
     transition: background-color 0.12s, color 0.12s;
 
-    &:hover {
+    &:hover:not(:disabled) {
       background-color: mc('grey', '900');
       color: #fff;
     }
@@ -314,6 +344,11 @@ $ai-header-border: rgba(255, 255, 255, 0.12);
     &:focus-visible {
       outline: 2px solid mc('blue', '300');
       outline-offset: 2px;
+    }
+
+    &:disabled {
+      opacity: 0.4;
+      cursor: default;
     }
   }
 

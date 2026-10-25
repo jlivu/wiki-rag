@@ -1,4 +1,5 @@
 import type { ChatMessage } from '../types'
+import { messageText } from '../types'
 import { AnswerComponent } from './cards'
 import { Markdown } from './Markdown'
 import { TypingDots } from './TypingDots'
@@ -17,12 +18,14 @@ export function MessageBubble ({ message, locale }: {
       <div className="msg-inner">
         <div className={bubbleClass}>
           {isUser
-            ? <p className="plain">{message.text}</p>
-            : message.text.length > 0 ? <Markdown text={message.text} /> : null}
+            ? <p className="plain">{messageText(message)}</p>
+            // Parts in the order the model produced them.
+            : message.parts.map((part, index) => (
+                part.type === 'text'
+                  ? (part.text.length > 0 ? <Markdown key={index} text={part.text} /> : null)
+                  : <AnswerComponent key={index} component={part.component} locale={locale} />
+              ))}
           {message.status === 'streaming' ? <TypingDots /> : null}
-          {message.components.map((component, index) => (
-            <AnswerComponent key={`${component.name}-${index}`} component={component} locale={locale} />
-          ))}
         </div>
         <div className="msg-time">{formatTime(message.at)}</div>
       </div>

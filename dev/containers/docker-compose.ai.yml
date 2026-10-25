@@ -16,9 +16,17 @@ services:
     build:
       context: ../../ai
       dockerfile: Dockerfile
+    # Settings and the API key live in ai/.env, which is gitignored.
+    # See ai/.env.example. The stack still starts without it.
+    env_file:
+      - path: ../../ai/.env
+        required: false
     environment:
       HOST: 0.0.0.0
       PORT: "4000"
+    # Ollama runs natively on the Mac, not in a container.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     # Reachable as ai:4000 inside the Docker network only; the proxy
     # is the only way in from the host.
     expose:

@@ -1,6 +1,6 @@
-import { parsePanelComponent, type PanelComponent } from '@shared'
+import { parsePanelComponent } from '@shared'
 
-import type { ChatMessage, StoredThread } from '../types'
+import type { ChatMessage, MessagePart, StoredThread } from '../types'
 
 /**
  * The conversation lives for as long as the browser tab does. sessionStorage
@@ -43,11 +43,6 @@ export function clearThread (): void {
   }
 }
 
-/**
- * Stored messages are re-checked against the shared schemas on the way in, so
- * a card whose shape has since changed is dropped instead of breaking the
- * panel.
- */
 function readThread (value: unknown): StoredThread | null {
   if (!isRecord(value)) { return null }
   const threadId = typeof value.threadId === 'string' ? value.threadId : null
@@ -63,24 +58,56 @@ function readThread (value: unknown): StoredThread | null {
 
 function readMessage (value: unknown): ChatMessage | null {
   if (!isRecord(value)) { return null }
-  const { id, role, text, at } = value
+  const { id, role, at } = value
   if (typeof id !== 'string') { return null }
   if (role !== 'user' && role !== 'assistant') { return null }
-  if (typeof text !== 'string' || typeof at !== 'number') { return null }
+  if (typeof at !== 'number') { return null }
 
-  const components: PanelComponent[] = []
-  if (Array.isArray(value.components)) {
-    for (const entry of value.components) {
-      if (!isRecord(entry) || typeof entry.name !== 'string') { continue }
-      const result = parsePanelComponent(entry.name, entry.args)
-      if (result.ok) { components.push(result.component) }
-    }
-  }
+  const parts = Array.isArray(value.parts)
+    ? readParts(value.parts)
+    // A thread stored before replies became ordered parts.
+    : readLegacyParts(value)
+  if (parts.length === 0) { return null }
 
   // A reply that was still streaming when the page was left is kept as it
   // was, not as unfinished business.
   const status = value.status === 'error' ? 'error' : undefined
-  return { id, role, text, components, at, ...(status ? { status } : {}) }
+  return { id, role, parts, at, ...(status ? { status } : {}) }
+}
+
+/**
+ * Cards are re-checked against the shared schemas on the way in, so one
+ * whose shape has since changed is dropped instead of breaking the panel.
+ */
+function readParts (value: unknown[]): MessagePart[] {
+  const parts: MessagePart[] = []
+  for (const entry of value) {
+    if (!isRecord(entry)) { continue }
+    if (entry.type === 'text' && typeof entry.text === 'string') {
+      parts.push({ type: 'text', text: entry.text })
+      continue
+    }
+    if (entry.type === 'component' && isRecord(entry.component) && typeof entry.component.name === 'string') {
+      const result = parsePanelComponent(entry.component.name, entry.component.args)
+      if (result.ok) { parts.push({ type: 'component', component: result.component }) }
+    }
+  }
+  return parts
+}
+
+function readLegacyParts (value: Record<string, unknown>): MessagePart[] {
+  const parts: MessagePart[] = []
+  if (typeof value.text === 'string' && value.text.length > 0) {
+    parts.push({ type: 'text', text: value.text })
+  }
+  if (Array.isArray(value.components)) {
+    for (const entry of value.components) {
+      if (!isRecord(entry) || typeof entry.name !== 'string') { continue }
+      const result = parsePanelComponent(entry.name, entry.args)
+      if (result.ok) { parts.push({ type: 'component', component: result.component }) }
+    }
+  }
+  return parts
 }
 
 function isRecord (value: unknown): value is Record<string, unknown> {

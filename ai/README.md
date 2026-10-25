@@ -17,7 +17,7 @@ with `postMessage`, and both sides check the origin.
 
 | Route           | What it does                                                   |
 | --------------- | --------------------------------------------------------------- |
-| `/ai/health`    | Returns `{ "ok": true }`.                                         |
+| `/ai/health`    | `{ ok, provider: { id, model, label } }`. The panel's status chip shows the label. |
 | `/ai/api/agent` | One AG-UI run, streamed back as server-sent events.               |
 | `/ai/panel/`    | The chat app. Vite's dev server in development, the built files in production. |
 
@@ -68,9 +68,9 @@ container, e.g. `docker exec wiki-ai npm install --package-lock-only`, so each
 `package-lock.json` stays in step with the pinned versions in its
 `package.json`.
 
-## Two settings to set by hand in the wiki
+## Three settings to set by hand in the wiki
 
-Both are one-off, in the wiki's admin area at http://127.0.0.1:3080/a.
+All one-off, in the wiki's admin area at http://127.0.0.1:3080/a.
 
 1. **Admin > Theme > Head HTML Injection** — tells the panel where the chat app
    lives. Without it the panel shows its "Not connected yet" placeholder.
@@ -86,23 +86,111 @@ Both are one-off, in the wiki's admin area at http://127.0.0.1:3080/a.
 2. **Admin > General > Site URL** — `http://127.0.0.1:3080`, so the wiki builds
    its links for the proxy rather than for port 3002.
 
-## The mock agent
+3. **Admin > Search Engine** — switch from **Database - Basic** to
+   **Database - PostgreSQL**, Apply, then **Rebuild Index**. Basic matches
+   titles, descriptions and paths only, so the agent cannot find a page by
+   what is written in it. See "The search engine matters" below.
 
-There is no model and no knowledge base yet. `src/agent/mock-agent.ts` picks a
-canned answer by keyword, so every answer component can be seen:
+## Settings
 
-| Ask for      | You get             |
-| ------------ | ------------------- |
-| `restore`    | a numbered checklist |
-| `error 3201` | a known-issue card   |
-| `compare`    | a table              |
-| `sources`    | source cards         |
-| `draft`      | a draft page form    |
-| anything else | a short text answer that names the page you are on |
+Everything comes from `ai/.env`, which is gitignored and loaded by
+`docker compose` through `env_file`. `ai/.env.example` lists every setting
+with no values; copy what you need.
 
-The first match wins, so "compare the sources" gives a table. Text is streamed
-in small pieces with short delays, so the panel's streaming and typing
-indicator are exercised.
+| Setting             | Default                            | What it does |
+| ------------------- | ---------------------------------- | ------------ |
+| `LLM_PROVIDER`      | `mock`                             | `anthropic`, `ollama` or `mock`. |
+| `LLM_MODEL`         | per provider                       | `claude-sonnet-5-5` for Anthropic, `qwen3.5` for Ollama. |
+| `ANTHROPIC_API_KEY` | —                                  | Required for `anthropic`. Never logged, never sent to the browser. |
+| `OLLAMA_URL`        | `http://host.docker.internal:11434`| Ollama runs natively on the Mac, so containers reach it through the host. |
+| `MAX_TOOL_STEPS`    | `6`                                | Rounds of wiki tool calls before the agent has to answer. |
+| `MAX_OUTPUT_TOKENS` | `8192`                             | Ceiling for one reply. Thinking counts towards it on current Claude models. |
+| `LLM_EFFORT`        | `medium`                           | Anthropic only: `low` to `max`. Higher costs more and takes longer. |
+| `LLM_TIMEOUT_MS`    | `120000`                           | Give up on a model that has stopped responding. |
+| `WIKI_URL`          | `http://wiki-app:3000`             | Where Wiki.js answers, from inside the Docker network. |
+
+Restart the service after editing `ai/.env` — `docker compose … up -d ai`
+(`docker restart wiki-ai` does not reread the file).
+
+## Providers
+
+`src/providers/` has one interface, `ChatProvider`, and two implementations.
+Nothing else in the agent knows which is running.
+
+- **Anthropic** (`anthropic.ts`) — the official SDK. Current Claude models
+  think adaptively by default and reject `temperature`/`top_p`/`budget_tokens`,
+  so none of those are sent; depth is set with `effort` instead. Default model
+  `claude-sonnet-5-5`; `claude-haiku-5-5` is the cheaper option.
+- **Ollama** (`ollama.ts`) — its OpenAI-compatible API, through the `openai`
+  client. Any locally pulled model with the `tools` capability works
+  (`ollama show <model>` lists them). It is much slower than the cloud on this
+  hardware.
+- **Mock** (`LLM_PROVIDER=mock`) — the canned keyword replies from step 2, for
+  UI work with no model calls and no cost: `restore`, `error 3201`, `compare`,
+  `sources`, `draft`, and a short text answer for anything else.
+
+The status chip in the panel header names the model and where it runs:
+"Claude Sonnet 5.5 · Cloud", "qwen3.5 · Local", "Mock · Dev".
+
+## How the agent answers
+
+`src/agent/wiki-agent.ts` runs a short loop: ask the model, run whatever tools
+it asked for, ask again with the results. It stops when the model answers, or
+after `MAX_TOOL_STEPS` rounds — the pass after that offers no wiki tools, so
+the model has to reply with what it has.
+
+Two tools read the wiki (`src/wiki/tools.ts`):
+
+- `search_wiki(query, locale?, limit?)` — Wiki.js's own `pages.search`,
+  returning titles, paths and descriptions.
+- `get_page(path, locale?)` — one page as Markdown.
+
+Five more tools draw the answer: `sources`, `checklist`, `known_issue`,
+`table`, `draft_page`. They are the same five components as before, described
+to the model from `shared/components.ts`, so a tool call that satisfies the
+schema also passes `parsePanelComponent`.
+
+The system prompt (`src/agent/system-prompt.ts`) holds the agent to the wiki:
+answer only from pages read in this run, never invent a command or a setting,
+and when the wiki has no answer say so and offer a draft page.
+
+Every run logs the provider, the model, whether the reader was signed in, the
+tool calls with their timings and result sizes, and the token usage — no page
+content and no credentials:
+
+```
+docker logs wiki-ai | grep 'agent run finished'
+```
+
+## Permissions
+
+The tools run on the server but always as the reader who asked.
+
+The panel is served from the wiki's own origin, so the browser sends the
+reader's Wiki.js `jwt` cookie with every run. The service forwards that token
+to Wiki.js as a bearer token (`server/helpers/security.js` accepts either),
+and Wiki.js applies its own page permissions. With no token the reader is the
+guest account, exactly as if they were logged out in a browser. There is no
+admin key anywhere in this path.
+
+`get_page` reads the **rendered** page over HTTP rather than the Markdown
+source over GraphQL, because an ordinary reader cannot use the source:
+`pages.single` and `pages.singleByPath` both require `manage:pages` or
+`delete:pages`, and `Page.content` requires `read:source`. The rendered HTML
+is converted to Markdown with turndown, tables included — troubleshooting
+pages keep their error codes in tables.
+
+## The search engine matters
+
+Admin > Search Engine decides what `search_wiki` can find.
+
+- **Database - Basic** (`db`, the default) matches the **title, description
+  and path only**. A page whose body covers a topic its title does not mention
+  is invisible, so the agent correctly reports that the wiki does not cover it.
+- **Database - PostgreSQL** indexes the page **content** as well.
+
+Switch to **Database - PostgreSQL** in Admin > Search Engine, press Apply,
+then **Rebuild Index**. Nothing else in the assistant has to change.
 
 ## The protocol
 
@@ -116,12 +204,19 @@ The reply is an SSE stream of:
 
 ```
 RUN_STARTED
-TEXT_MESSAGE_START -> TEXT_MESSAGE_CONTENT… -> TEXT_MESSAGE_END
-TOOL_CALL_START -> TOOL_CALL_ARGS… -> TOOL_CALL_END     (zero or one, for a card)
+TEXT_MESSAGE_START -> TEXT_MESSAGE_CONTENT… -> TEXT_MESSAGE_END   (once per round)
+TOOL_CALL_START -> TOOL_CALL_ARGS… -> TOOL_CALL_END               (one per card)
 RUN_FINISHED
 ```
 
-and `RUN_ERROR` instead of the rest if something fails.
+and `RUN_ERROR` instead of the rest if something fails — a missing key, a
+provider error, a timeout — each with a short message for the reader and the
+detail in the service log.
+
+A run can hold several text messages, one per round of tool calls, so the
+panel joins them rather than letting the last one replace the rest. The wiki
+tools are not in this stream: they run on the server and only their results
+reach the model.
 
 A tool call is how an answer asks for a card. The name has to be one of
 `sources`, `checklist`, `known_issue`, `table` or `draft_page`, and the

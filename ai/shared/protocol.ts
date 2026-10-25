@@ -30,8 +30,20 @@ export function readForwardedPage (value: unknown): PageContext | undefined {
   }
 }
 
-/** Status chip text in the panel header. */
-export const STATUS_ONLINE_LABEL = 'Mock · Dev'
+/** What GET /ai/health answers. */
+export interface HealthResponse {
+  ok: boolean
+  provider: {
+    /** anthropic, ollama or mock. */
+    id: string
+    model: string
+    /** Status chip text, e.g. "Claude Sonnet 5.5 · Cloud". */
+    label: string
+  }
+}
+
+/** Status chip text in the panel header, when the service has not said. */
+export const STATUS_ONLINE_LABEL = 'Connected'
 export const STATUS_OFFLINE_LABEL = 'Offline'
 
 /**
@@ -43,3 +55,10 @@ export type ParentMessage =
   | { type: 'wiki-ai:status', label: string, online: boolean }
   | { type: 'wiki-ai:unread', count: number }
   | { type: 'wiki-ai:close' }
+
+/**
+ * Messages the wiki page posts into the chat app's iframe. The chat app
+ * takes one only from its own parent window, on its own origin.
+ */
+export type PanelMessage =
+  | { type: 'wiki-ai:new-chat' }

@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 
 const MAX_HEIGHT = 140
 
-export function Composer ({ busy, onSend }: {
+export function Composer ({ busy, focusToken, onSend }: {
   busy: boolean
+  /** Changes when something outside wants the cursor back in the box. */
+  focusToken: number
   onSend: (text: string) => void
 }) {
   const [value, setValue] = useState('')
@@ -19,7 +21,7 @@ export function Composer ({ busy, onSend }: {
 
   useEffect(() => {
     box.current?.focus()
-  }, [])
+  }, [focusToken])
 
   const submit = () => {
     const text = value.trim()

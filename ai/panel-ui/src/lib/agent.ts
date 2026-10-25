@@ -4,6 +4,7 @@ import type { Message } from '@ag-ui/core'
 import { AGENT_PATH } from '@shared'
 
 import type { ChatMessage } from '../types'
+import { messageText } from '../types'
 
 /**
  * One agent per thread. It holds the conversation that is sent with every
@@ -20,10 +21,11 @@ export function createAgent (threadId: string, history: ChatMessage[]): HttpAgen
 /** Cards are drawn from tool calls and are not part of the history. */
 export function toAgentMessages (messages: ChatMessage[]): Message[] {
   return messages
-    .filter(message => message.status !== 'error' && message.text.trim().length > 0)
-    .map((message): Message => (
+    .map(message => ({ message, text: messageText(message) }))
+    .filter(({ message, text }) => message.status !== 'error' && text.length > 0)
+    .map(({ message, text }): Message => (
       message.role === 'user'
-        ? { id: message.id, role: 'user', content: message.text }
-        : { id: message.id, role: 'assistant', content: message.text }
+        ? { id: message.id, role: 'user', content: text }
+        : { id: message.id, role: 'assistant', content: text }
     ))
 }

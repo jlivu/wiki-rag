@@ -8,10 +8,11 @@ export function postToParent (message: ParentMessage): void {
   window.parent.postMessage(message, window.location.origin)
 }
 
-export function postStatus (online: boolean): void {
+/** The label comes from the service, so the chip names the live model. */
+export function postStatus (online: boolean, label?: string): void {
   postToParent({
     type: 'wiki-ai:status',
-    label: online ? STATUS_ONLINE_LABEL : STATUS_OFFLINE_LABEL,
+    label: online ? (label ?? STATUS_ONLINE_LABEL) : STATUS_OFFLINE_LABEL,
     online
   })
 }
