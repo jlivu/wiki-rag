@@ -36,14 +36,24 @@ export function createAnthropicProvider (llm: LlmConfig): ChatProvider {
       const stream = client.messages.stream({
         model: llm.model,
         max_tokens: request.maxOutputTokens,
-        system: request.system,
+        // Tools render before the system prompt, so one breakpoint on the
+        // last system block caches both. Neither changes within a run.
+        system: [{
+          type: 'text',
+          text: request.system,
+          ...(llm.cachePrompt ? { cache_control: { type: 'ephemeral' as const } } : {})
+        }],
         messages: toAnthropicMessages(request.messages),
         tools: request.tools.map(tool => ({
           name: tool.name,
           description: tool.description,
           input_schema: tool.inputSchema as Anthropic.Tool['input_schema']
         })),
-        output_config: { effort: llm.effort }
+        output_config: { effort: llm.effort },
+        // Caches the conversation so far as well: a run asks the model
+        // several times with a growing prefix, and so does a follow-up
+        // question in the same thread.
+        ...(llm.cachePrompt ? { cache_control: { type: 'ephemeral' as const } } : {})
       }, { signal: request.signal })
 
       try {
@@ -84,7 +94,9 @@ export function createAnthropicProvider (llm: LlmConfig): ChatProvider {
         yield {
           type: 'usage',
           inputTokens: message.usage.input_tokens,
-          outputTokens: message.usage.output_tokens
+          outputTokens: message.usage.output_tokens,
+          cacheWriteTokens: message.usage.cache_creation_input_tokens ?? 0,
+          cacheReadTokens: message.usage.cache_read_input_tokens ?? 0
         }
         yield { type: 'stop', reason: toStopReason(message.stop_reason) }
       } catch (err) {

@@ -1,0 +1,31 @@
+key: rag
+title: AI Assistant Index
+description: Tells the AI assistant when a page changes, so its search index stays current. Sends only the page id, path and locale; it never writes files anywhere.
+author: doft.gov.vu
+logo: data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0OCA0OCI+PGNpcmNsZSBjeD0iMjQiIGN5PSIyNCIgcj0iMjIiIGZpbGw9IiMxOTc2ZDIiLz48ZyBmaWxsPSJub25lIiBzdHJva2U9IiNmZmYiIHN0cm9rZS13aWR0aD0iMi40IiBzdHJva2UtbGluZWNhcD0icm91bmQiPjxlbGxpcHNlIGN4PSIyNCIgY3k9IjE1IiByeD0iMTEiIHJ5PSI1Ii8+PHBhdGggZD0iTTEzIDE1djE4YzAgMi44IDQuOSA1IDExIDVzMTEtMi4yIDExLTVWMTUiLz48cGF0aCBkPSJNMTMgMjRjMCAyLjggNC45IDUgMTEgNXMxMS0yLjIgMTEtNSIvPjwvZz48L3N2Zz4=
+website: https://github.com/requarks/wiki
+isAvailable: true
+supportedModes:
+  - push
+defaultMode: push
+schedule: PT30M
+props:
+  indexerUrl:
+    type: String
+    default: http://ai:4000
+    title: AI service URL
+    hint: Where the AI service answers inside the Docker network. Its indexer routes are not published through the reverse proxy.
+    order: 1
+  timeoutMs:
+    type: Number
+    default: 2000
+    title: Timeout (ms)
+    hint: How long to let a notification take before abandoning it. Saving a page never waits for the reply, so this only bounds the background request.
+    order: 2
+actions:
+  - handler: reindexAll
+    label: Re-index everything
+    hint: Throw away the assistant's index and build it again from every published page. Safe to run at any time; the wiki itself is not touched.
+  - handler: syncNow
+    label: Reconcile now
+    hint: Compare the assistant's index with the page list straight away, instead of waiting for the next scheduled sync.

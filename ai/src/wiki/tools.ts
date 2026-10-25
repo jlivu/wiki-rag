@@ -2,6 +2,9 @@
  * The two tools the agent uses to read the wiki. Both run here on the
  * server, as the reader who asked, so Wiki.js decides what they may see.
  */
+import type { FastifyBaseLogger } from 'fastify'
+
+import type { Retriever } from '../indexer/retrieval.js'
 import type { ToolSpec } from '../providers/types.js'
 
 import { WikiClient, WikiError } from './client.js'
@@ -19,10 +22,11 @@ export function wikiToolSpecs (defaultLocale: string): ToolSpec[] {
     {
       name: SEARCH_WIKI,
       description: [
-        'Search this wiki for pages matching a short keyword query, and get back their titles, paths and descriptions.',
-        'Call it before answering anything about the wiki\'s content. Two or three keywords work better than a sentence;',
-        'search again with different words if the first set finds nothing. It returns only pages the reader is allowed to see,',
-        'and it does not return page content — follow up with get_page to read one.'
+        'Search this wiki and get back the pages that match, each with a short snippet of the part that matched.',
+        'Call it before answering anything about the wiki\'s content. It searches the words on the page as well as its',
+        'title, so a plain question works as well as keywords; search again with different wording if the first attempt',
+        'finds nothing. It returns only pages the reader is allowed to see. The snippets are an extract, not the page —',
+        'read a page with get_page before you answer from it.'
       ].join(' '),
       inputSchema: {
         type: 'object',
@@ -66,16 +70,26 @@ export interface ToolOutcome {
   summary: Record<string, unknown>
 }
 
+/** Everything a tool needs to answer as the reader who asked. */
+export interface ToolContext {
+  client: WikiClient
+  /** The reader's Wiki.js token, or null for a guest. */
+  token: string | null
+  defaultLocale: string
+  /** Null when there is no index to search. */
+  retriever: Retriever | null
+  log: FastifyBaseLogger
+}
+
 export async function runWikiTool (
-  client: WikiClient,
-  defaultLocale: string,
+  ctx: ToolContext,
   name: string,
   args: unknown
 ): Promise<ToolOutcome> {
   const input = (typeof args === 'object' && args !== null ? args : {}) as Record<string, unknown>
   try {
-    if (name === SEARCH_WIKI) { return await search(client, defaultLocale, input) }
-    if (name === GET_PAGE) { return await getPage(client, defaultLocale, input) }
+    if (name === SEARCH_WIKI) { return await search(ctx, input) }
+    if (name === GET_PAGE) { return await getPage(ctx.client, ctx.defaultLocale, input) }
     return fail(`There is no tool called "${name}".`)
   } catch (err) {
     if (err instanceof WikiError) {
@@ -107,18 +121,57 @@ const SEARCH_QUERY = `
   }
 `
 
-async function search (
-  client: WikiClient,
-  defaultLocale: string,
-  input: Record<string, unknown>
-): Promise<ToolOutcome> {
+/**
+ * The index answers when it can. Wiki.js's own search is the fallback, used
+ * only when there is no index to ask — not when the index simply found
+ * nothing, which is an answer.
+ */
+async function search (ctx: ToolContext, input: Record<string, unknown>): Promise<ToolOutcome> {
   const query = asString(input.query)
   if (!query) { return fail('search_wiki needs a "query".') }
 
-  const locale = asString(input.locale) ?? defaultLocale
+  const locale = asString(input.locale) ?? ctx.defaultLocale
   const limit = Math.min(asInt(input.limit) ?? DEFAULT_RESULT_LIMIT, MAX_RESULT_LIMIT)
 
-  const data = await client.graphql<SearchResponse>(SEARCH_QUERY, { query, locale })
+  if (ctx.retriever) {
+    try {
+      if (await ctx.retriever.hasContent()) {
+        const found = await ctx.retriever.search(query, locale, limit, ctx.client, ctx.token)
+        return {
+          result: JSON.stringify({
+            query,
+            results: found.results,
+            ...(found.results.length === 0
+              ? { note: 'Nothing matched. Try different wording, or tell the reader the wiki does not cover this.' }
+              : {})
+          }),
+          summary: {
+            query,
+            locale,
+            source: 'index',
+            results: found.results.length,
+            checked: found.checked,
+            filtered: found.filtered
+          }
+        }
+      }
+      ctx.log.warn({ query }, 'the page index is empty; falling back to the wiki search')
+    } catch (err) {
+      ctx.log.warn({ err, query }, 'the page index could not be searched; falling back to the wiki search')
+    }
+  }
+
+  return await searchViaWiki(ctx, query, locale, limit)
+}
+
+/** Wiki.js's own search engine, which filters by reader on its side. */
+async function searchViaWiki (
+  ctx: ToolContext,
+  query: string,
+  locale: string,
+  limit: number
+): Promise<ToolOutcome> {
+  const data = await ctx.client.graphql<SearchResponse>(SEARCH_QUERY, { query, locale })
   const found = data.pages.search
   const results = found.results.slice(0, limit).map(page => ({
     title: page.title,
@@ -137,7 +190,7 @@ async function search (
         ? { note: 'Nothing matched. Try different keywords, or tell the reader the wiki does not cover this.' }
         : {})
     }),
-    summary: { query, locale, results: results.length, totalHits: found.totalHits }
+    summary: { query, locale, source: 'wiki', results: results.length, totalHits: found.totalHits }
   }
 }
 

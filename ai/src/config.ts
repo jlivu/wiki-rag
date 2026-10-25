@@ -19,6 +19,19 @@ export interface LlmConfig {
   maxOutputTokens: number
   effort: Effort
   timeoutMs: number
+  /** Anthropic prompt caching. On by default; off to measure its effect. */
+  cachePrompt: boolean
+}
+
+/** The index database, the embedding model and the indexer's timings. */
+export interface IndexConfig {
+  databaseUrl: string
+  embedModel: string
+  /** Rapid saves of one page collapse into a single job after this long. */
+  debounceSeconds: number
+  reconcileMinutes: number
+  /** Reads page source as an admin. Without it the indexer stays off. */
+  wikiApiKey: string
 }
 
 export interface Config {
@@ -27,6 +40,7 @@ export interface Config {
   logLevel: string
   wikiUrl: string
   llm: LlmConfig
+  index: IndexConfig
 }
 
 const DEFAULT_MODELS: Record<ProviderId, string> = {
@@ -52,7 +66,16 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
       maxToolSteps: readInt(env.MAX_TOOL_STEPS, 6),
       maxOutputTokens: readInt(env.MAX_OUTPUT_TOKENS, 8192),
       effort: readEffort(env.LLM_EFFORT),
-      timeoutMs: readInt(env.LLM_TIMEOUT_MS, 120000)
+      timeoutMs: readInt(env.LLM_TIMEOUT_MS, 120000),
+      cachePrompt: readBool(env.LLM_PROMPT_CACHE, true)
+    },
+    index: {
+      // Matches the ai-db service in dev/containers/docker-compose.ai.yml.
+      databaseUrl: env.INDEX_DB_URL ?? 'postgres://wiki_ai:wiki_ai@ai-db:5432/wiki_ai',
+      embedModel: nonEmpty(env.EMBED_MODEL) ?? 'nomic-embed-text',
+      debounceSeconds: readInt(env.INDEX_DEBOUNCE_SECONDS, 10),
+      reconcileMinutes: readInt(env.RECONCILE_MINUTES, 30),
+      wikiApiKey: env.WIKI_API_KEY ?? ''
     }
   }
 }
@@ -65,8 +88,13 @@ export function describeConfig (config: Config): Record<string, unknown> {
     maxToolSteps: config.llm.maxToolSteps,
     maxOutputTokens: config.llm.maxOutputTokens,
     effort: config.llm.effort,
+    promptCache: config.llm.cachePrompt,
     wikiUrl: config.wikiUrl,
-    hasApiKey: config.llm.apiKey.length > 0
+    hasApiKey: config.llm.apiKey.length > 0,
+    embedModel: config.index.embedModel,
+    debounceSeconds: config.index.debounceSeconds,
+    reconcileMinutes: config.index.reconcileMinutes,
+    hasWikiApiKey: config.index.wikiApiKey.length > 0
   }
 }
 
@@ -80,6 +108,12 @@ function readEffort (value: string | undefined): Effort {
   const name = (value ?? 'medium').trim().toLowerCase() as Effort
   if (EFFORTS.includes(name)) { return name }
   throw new Error(`LLM_EFFORT must be one of ${EFFORTS.join(', ')} (got "${value}")`)
+}
+
+function readBool (value: string | undefined, fallback: boolean): boolean {
+  const text = value?.trim().toLowerCase()
+  if (text === undefined || text.length === 0) { return fallback }
+  return !['0', 'false', 'no', 'off'].includes(text)
 }
 
 function readInt (value: string | undefined, fallback: number): number {

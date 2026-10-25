@@ -9,11 +9,12 @@ import type { FastifyPluginAsync } from 'fastify'
 import { runMockAgent } from '../agent/mock-agent.js'
 import { runWikiAgent } from '../agent/wiki-agent.js'
 import type { Config } from '../config.js'
+import type { Indexer } from '../indexer/indexer.js'
 import { createProvider, ProviderError, type ChatProvider } from '../providers/index.js'
 import { WikiClient, readWikiToken } from '../wiki/client.js'
 import { AGENT_PATH, readForwardedPage } from '../../shared/index.js'
 
-export function agentRoutes (config: Config): FastifyPluginAsync {
+export function agentRoutes (config: Config, indexer: Indexer): FastifyPluginAsync {
   // Built once: the provider holds a client, not per-run state. A bad
   // configuration (a missing key, say) is kept and reported per run rather
   // than stopping the service from starting.
@@ -90,14 +91,22 @@ export function agentRoutes (config: Config): FastifyPluginAsync {
           return
         }
 
-        // Every wiki read happens as the reader who asked.
-        const wiki = new WikiClient(config.wikiUrl, readWikiToken(request))
+        // Every wiki read happens as the reader who asked, including the
+        // permission check the retriever runs over its own results.
+        const token = readWikiToken(request)
+        const wiki = new WikiClient(config.wikiUrl, token)
 
         const stats = await runWikiAgent({
           input: input.data,
           page,
           provider,
-          wiki,
+          tools: {
+            client: wiki,
+            token,
+            defaultLocale: page?.locale ?? 'en',
+            retriever: indexer.retriever,
+            log: request.log
+          },
           emit,
           isAborted: () => aborted,
           signal: abort.signal,
@@ -114,7 +123,12 @@ export function agentRoutes (config: Config): FastifyPluginAsync {
           steps: stats.steps,
           stopReason: stats.stopReason,
           toolCalls: stats.toolCalls,
-          usage: { input: stats.inputTokens, output: stats.outputTokens }
+          usage: {
+            input: stats.inputTokens,
+            output: stats.outputTokens,
+            cacheWrite: stats.cacheWriteTokens,
+            cacheRead: stats.cacheReadTokens
+          }
         }, 'agent run finished')
       } catch (err) {
         if (aborted) { return }

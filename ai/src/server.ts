@@ -1,8 +1,11 @@
 import Fastify from 'fastify'
 
 import { agentRoutes } from './routes/agent.js'
+import { internalRoutes } from './routes/internal.js'
 import { panelRoutes } from './routes/panel.js'
 import { describeConfig, loadConfig } from './config.js'
+import { Indexer } from './indexer/indexer.js'
+import { closePool } from './index-db/pool.js'
 import { providerLabel } from './providers/index.js'
 import { HEALTH_PATH, type HealthResponse } from '../shared/index.js'
 
@@ -27,16 +30,22 @@ app.get(HEALTH_PATH, async (): Promise<HealthResponse> => {
   }
 })
 
-await app.register(agentRoutes(config))
+const indexer = new Indexer(config, app.log)
+
+await app.register(agentRoutes(config, indexer))
+await app.register(internalRoutes(indexer))
 await app.register(panelRoutes)
 
 // Let tsx watch and `docker compose` restarts free the port cleanly.
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
-    app.close().then(
-      () => process.exit(0),
-      () => process.exit(1)
-    )
+    void indexer.stop()
+      .then(async () => { await app.close() })
+      .then(closePool)
+      .then(
+        () => process.exit(0),
+        () => process.exit(1)
+      )
   })
 }
 
@@ -46,3 +55,6 @@ try {
   app.log.error(err)
   process.exit(1)
 }
+
+// After listening, so a slow index database cannot hold up the panel.
+void indexer.start()

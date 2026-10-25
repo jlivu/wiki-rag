@@ -31,7 +31,14 @@ export type ChatMessage =
 export type ProviderEvent =
   | { type: 'text', delta: string }
   | { type: 'tool_call', call: ProviderToolCall }
-  | { type: 'usage', inputTokens: number, outputTokens: number }
+  | {
+      type: 'usage'
+      inputTokens: number
+      outputTokens: number
+      /** Prompt caching, when the provider reports it. */
+      cacheWriteTokens?: number
+      cacheReadTokens?: number
+    }
   /** Why the model stopped. 'length' means the reply was cut short. */
   | { type: 'stop', reason: 'end' | 'tool_use' | 'length' | 'other' }
 

@@ -25,8 +25,7 @@ import {
   type PageContext
 } from '../../shared/index.js'
 import type { ChatMessage, ChatProvider, ProviderToolCall, ToolSpec } from '../providers/types.js'
-import type { WikiClient } from '../wiki/client.js'
-import { isWikiTool, runWikiTool, wikiToolSpecs } from '../wiki/tools.js'
+import { isWikiTool, runWikiTool, wikiToolSpecs, type ToolContext } from '../wiki/tools.js'
 
 import { buildSystemPrompt } from './system-prompt.js'
 
@@ -39,7 +38,7 @@ export interface WikiAgentOptions {
   input: RunAgentInput
   page?: PageContext
   provider: ChatProvider
-  wiki: WikiClient
+  tools: ToolContext
   emit: (event: BaseEvent) => void
   isAborted: () => boolean
   signal: AbortSignal
@@ -52,14 +51,20 @@ export interface RunStats {
   toolCalls: Array<Record<string, unknown>>
   inputTokens: number
   outputTokens: number
+  /** Prompt caching: written on a miss, read on a hit. */
+  cacheWriteTokens: number
+  cacheReadTokens: number
   /** Why the model stopped last; 'length' means the reply was cut short. */
   stopReason: string
 }
 
 export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
-  const { input, provider, wiki, emit, isAborted } = opts
+  const { input, provider, tools: toolContext, emit, isAborted } = opts
   const locale = opts.page?.locale ?? 'en'
-  const stats: RunStats = { steps: 0, toolCalls: [], inputTokens: 0, outputTokens: 0, stopReason: 'end' }
+  const stats: RunStats = {
+    steps: 0, toolCalls: [], inputTokens: 0, outputTokens: 0,
+    cacheWriteTokens: 0, cacheReadTokens: 0, stopReason: 'end'
+  }
 
   emit({
     type: EventType.RUN_STARTED,
@@ -68,7 +73,7 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
     protocolVersion: PROTOCOL_VERSION
   })
 
-  const system = buildSystemPrompt(opts.page, !wiki.isAuthenticated)
+  const system = buildSystemPrompt(opts.page, !toolContext.client.isAuthenticated)
   const messages = toChatMessages(input.messages)
   const panelTools = panelToolSpecs()
   const allTools = [...wikiToolSpecs(locale), ...panelTools]
@@ -144,6 +149,8 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
         case 'usage':
           stats.inputTokens += event.inputTokens
           stats.outputTokens += event.outputTokens
+          stats.cacheWriteTokens += event.cacheWriteTokens ?? 0
+          stats.cacheReadTokens += event.cacheReadTokens ?? 0
           break
         case 'stop':
           stopReason = event.reason
@@ -183,7 +190,7 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
 
       const startedAt = Date.now()
       if (isWikiTool(call.name)) {
-        const outcome = await runWikiTool(wiki, locale, call.name, call.args)
+        const outcome = await runWikiTool(toolContext, call.name, call.args)
         messages.push(toolResult(call, outcome.result))
         stats.toolCalls.push({ name: call.name, ms: Date.now() - startedAt, ...outcome.summary })
         continue

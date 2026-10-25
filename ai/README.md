@@ -107,7 +107,13 @@ with no values; copy what you need.
 | `MAX_OUTPUT_TOKENS` | `8192`                             | Ceiling for one reply. Thinking counts towards it on current Claude models. |
 | `LLM_EFFORT`        | `medium`                           | Anthropic only: `low` to `max`. Higher costs more and takes longer. |
 | `LLM_TIMEOUT_MS`    | `120000`                           | Give up on a model that has stopped responding. |
+| `LLM_PROMPT_CACHE`  | `true`                             | Anthropic prompt caching. Set to `0` to measure its effect. |
 | `WIKI_URL`          | `http://wiki-app:3000`             | Where Wiki.js answers, from inside the Docker network. |
+| `WIKI_API_KEY`      | —                                  | Reads page source as an administrator, for the indexer. Without it the indexer stays off. |
+| `EMBED_MODEL`       | `nomic-embed-text`                 | Pulled in Ollama. Changing it re-embeds every page. |
+| `INDEX_DEBOUNCE_SECONDS` | `10`                          | Rapid saves of one page collapse into a single job. |
+| `RECONCILE_MINUTES` | `30`                               | How often the index is compared with the page list. |
+| `INDEX_DB_URL`      | `postgres://wiki_ai:wiki_ai@ai-db:5432/wiki_ai` | The index database. |
 
 Restart the service after editing `ai/.env` — `docker compose … up -d ai`
 (`docker restart wiki-ai` does not reread the file).
@@ -154,9 +160,16 @@ The system prompt (`src/agent/system-prompt.ts`) holds the agent to the wiki:
 answer only from pages read in this run, never invent a command or a setting,
 and when the wiki has no answer say so and offer a draft page.
 
+With Anthropic, the system prompt, the tool definitions and the conversation
+so far are cached: one breakpoint on the system block (tools render before
+it, so both are covered) and automatic placement on the last message block.
+A run asks the model several times with a growing prefix, and a follow-up
+question reuses the same prefix again, so most of the input is a cache read.
+`LLM_PROMPT_CACHE=0` turns it off.
+
 Every run logs the provider, the model, whether the reader was signed in, the
-tool calls with their timings and result sizes, and the token usage — no page
-content and no credentials:
+tool calls with their timings and result sizes, and the token usage including
+cache reads and writes — no page content and no credentials:
 
 ```
 docker logs wiki-ai | grep 'agent run finished'
@@ -179,6 +192,113 @@ source over GraphQL, because an ordinary reader cannot use the source:
 `delete:pages`, and `Page.content` requires `read:source`. The rendered HTML
 is converted to Markdown with turndown, tables included — troubleshooting
 pages keep their error codes in tables.
+
+## The page index
+
+`ai-db` is a Postgres with pgvector, on the Docker network only, holding a
+copy of every published page split into chunks with their embeddings. The
+schema is created by migrations that run at startup
+(`src/index-db/migrate.ts`):
+
+- `index_pages` — one row per page: path, locale, title, content type, a hash
+  of the source and Wiki.js's `updatedAt`.
+- `index_chunks` — the page id, the heading path, the chunk text, a content
+  hash, the embedding, the model that produced it, and `fts`, a generated
+  `tsvector`. An **HNSW** index covers the vectors and a **GIN** index covers
+  `fts`.
+- `index_queue` — one row per page waiting to be indexed.
+- `index_meta` — the embedding model and its width.
+
+### Embeddings
+
+Ollama on the Mac, with `EMBED_MODEL` (default `nomic-embed-text`, 768
+dimensions). The width is asked for at startup and recorded, because pgvector
+needs a fixed width to build an HNSW index. Changing the model empties the
+index and rebuilds it, since a vector from one model means nothing to
+another. pgvector indexes at most 2000 dimensions, so a wider model is
+refused with a message rather than half-applied.
+
+### The indexer
+
+A durable queue with one row per page, so five saves in a minute collapse
+into one job: each event pushes the deadline out by
+`INDEX_DEBOUNCE_SECONDS` (10 in development).
+
+A job fetches the page through Wiki.js GraphQL with `WIKI_API_KEY`, converts
+it to Markdown if it was not written in Markdown, splits it at its headings
+into chunks of roughly 300–600 tokens — each prefixed with the page title and
+the headings above it — embeds only the chunks whose hash changed, and
+replaces the page's chunks in one transaction. An unpublished page is removed
+from the index, a deleted page is removed, and a rename updates the path
+without re-embedding anything, because the text did not change.
+
+Reconciliation runs five seconds after startup and every
+`RECONCILE_MINUTES` (30). It compares Wiki.js's page list with the index,
+queues anything new or changed and removes anything that is gone. On an empty
+index that is the backfill.
+
+```
+docker logs wiki-ai | grep -E 'indexed a page|reconciled'
+docker exec wiki-ai-db psql -U wiki_ai -d wiki_ai -c 'SELECT * FROM index_pages'
+```
+
+### Routes for the wiki, not for readers
+
+`/internal/*` sits **outside** the `/ai` prefix, and the proxy forwards only
+`/ai/*` to this service. So `http://127.0.0.1:3080/internal/...` reaches
+Wiki.js and 404s, while `wiki-app` can call
+`http://ai:4000/internal/...` directly on the Docker network.
+
+| Route | Called by |
+| ----- | --------- |
+| `POST /internal/page-event` | the storage module, on every page change |
+| `POST /internal/reconcile`  | its scheduled sync, and "Reconcile now" |
+| `POST /internal/reindex`    | "Re-index everything" |
+| `GET  /internal/status`     | whoever wants to see queue depth and counts |
+
+### How search_wiki answers
+
+`search_wiki` keeps its name and its input schema, but the index answers it
+now. Two searches run over the same chunks — nearest neighbours by cosine
+distance (HNSW) and full text (`websearch_to_tsquery` ranked by
+`ts_rank_cd`, GIN) — taking the top 30 from each. The two rankings are merged
+with reciprocal rank fusion, `score = Σ 1 / (60 + rank)`, which needs no
+calibration between a distance and a text rank. Chunks are then grouped back
+into pages, each page keeping its best one or two chunks as its snippet, and
+the top pages come back with title, path, heading, snippet, last-updated date
+and score.
+
+Wiki.js's own search is the fallback, used only when there is no index to
+ask — the database is unreachable, or nothing has been indexed yet. It is
+logged when that happens. A query that simply matches nothing is an answer,
+not a fallback.
+
+### Permissions at query time
+
+The index is built with the admin key, so it holds pages that a particular
+reader may not see. Every candidate page is therefore checked against
+Wiki.js **as the reader who asked**, with the same request `get_page` makes,
+before anything reaches the model — snippets included. More candidates are
+fetched than are returned so enough survive, and each reader's decisions are
+cached for a minute (keyed by a hash of their token, never the token).
+
+### Turning it on in the wiki
+
+The indexer only hears about a change if the storage module is enabled.
+In **Administration > Storage**:
+
+1. Pick **AI Assistant Index** in the list.
+2. Turn **Active** on.
+3. Leave **AI service URL** as `http://ai:4000` and **Timeout** as `2000`.
+4. **Apply**.
+
+The two buttons under **Actions** on the same page are **Re-index
+everything** and **Reconcile now**. Sync Direction is Push — the only mode
+it supports — and the sync schedule defaults to every 30 minutes.
+
+The module stores nothing and writes no files. It posts
+`{ event, id, path, locale }` and returns immediately: a page save never
+waits for the assistant, and never fails because of it.
 
 ## The search engine matters
 
