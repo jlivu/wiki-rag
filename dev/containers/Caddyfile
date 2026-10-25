@@ -1,0 +1,29 @@
+# -- DEV REVERSE PROXY --
+# -- DO NOT USE IN PRODUCTION! --
+#
+# One origin for both halves of the assistant:
+#   /ai/*  -> the AI service, path unchanged (so it still sees /ai/panel)
+#   /*     -> Wiki.js
+{
+	auto_https off
+	admin off
+}
+
+:80 {
+	# `handle` keeps the /ai prefix, unlike `handle_path`.
+	handle /ai/* {
+		reverse_proxy ai:4000 {
+			# No response buffering, for streamed chat replies later on.
+			flush_interval -1
+		}
+	}
+
+	handle {
+		reverse_proxy wiki-app:3000 {
+			# Keeps webpack's hot-reload event stream and any other
+			# streamed response flowing. Caddy upgrades the GraphQL
+			# WebSocket on its own.
+			flush_interval -1
+		}
+	}
+}

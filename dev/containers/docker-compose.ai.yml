@@ -1,0 +1,39 @@
+# -- DEV DOCKER-COMPOSE OVERLAY: AI SERVICE + REVERSE PROXY --
+# -- DO NOT USE IN PRODUCTION! --
+#
+# Adds the AI service and puts it on the same origin as the wiki, which is
+# what the assistant panel's iframe needs. Use it alongside the base file:
+#
+#   docker compose -f dev/containers/docker-compose.yml \
+#                  -f dev/containers/docker-compose.ai.yml up -d
+#
+# Then open the wiki at http://127.0.0.1:3080 (not 3002), so that /ai/* and
+# the wiki share one origin.
+
+services:
+  ai:
+    container_name: wiki-ai
+    build:
+      context: ../../ai
+      dockerfile: Dockerfile
+    environment:
+      HOST: 0.0.0.0
+      PORT: "4000"
+    # Reachable as ai:4000 inside the Docker network only; the proxy
+    # is the only way in from the host.
+    expose:
+      - "4000"
+    volumes:
+      - ../../ai:/app
+      - /app/node_modules
+
+  proxy:
+    container_name: wiki-proxy
+    image: caddy:2.11.7-alpine
+    depends_on:
+      - wiki
+      - ai
+    ports:
+      - "3080:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
