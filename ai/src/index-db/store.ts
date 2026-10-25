@@ -15,6 +15,9 @@ export interface IndexedPage {
   contentType: string
   sourceHash: string
   updatedAt: string
+  /** Wiki.js's publish window; null when unset. See indexer/publish-window.ts. */
+  publishStart?: string | null
+  publishEnd?: string | null
 }
 
 export interface ChunkInput {
@@ -93,13 +96,17 @@ export async function replacePage (
 ): Promise<void> {
   await withTransaction(db, async client => {
     await client.query(`
-      INSERT INTO index_pages (id, path, locale, title, description, content_type, source_hash, updated_at, indexed_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+      INSERT INTO index_pages (id, path, locale, title, description, content_type, source_hash,
+                               updated_at, publish_start, publish_end, indexed_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
       ON CONFLICT (id) DO UPDATE SET
         path = EXCLUDED.path, locale = EXCLUDED.locale, title = EXCLUDED.title,
         description = EXCLUDED.description, content_type = EXCLUDED.content_type,
-        source_hash = EXCLUDED.source_hash, updated_at = EXCLUDED.updated_at, indexed_at = now()
-    `, [page.id, page.path, page.locale, page.title, page.description, page.contentType, page.sourceHash, page.updatedAt])
+        source_hash = EXCLUDED.source_hash, updated_at = EXCLUDED.updated_at,
+        publish_start = EXCLUDED.publish_start, publish_end = EXCLUDED.publish_end,
+        indexed_at = now()
+    `, [page.id, page.path, page.locale, page.title, page.description, page.contentType,
+      page.sourceHash, page.updatedAt, page.publishStart ?? null, page.publishEnd ?? null])
 
     // A page can be renamed onto a path an older, since-deleted row still
     // holds; the unique index would reject the upsert above otherwise.
@@ -156,11 +163,22 @@ export async function readPage (db: Pool, pageId: number): Promise<IndexedPage |
     : null
 }
 
-export async function touchPage (db: Pool, pageId: number, updatedAt: string): Promise<void> {
-  await db.query(
-    'UPDATE index_pages SET updated_at = $2, indexed_at = now() WHERE id = $1',
-    [pageId, updatedAt]
-  )
+/**
+ * The page is unchanged, so only its timestamps are written — and its
+ * publish window, which is not part of the content hash and can be
+ * changed without the page itself changing.
+ */
+export async function touchPage (
+  db: Pool,
+  pageId: number,
+  updatedAt: string,
+  window: { start: string | null, end: string | null } = { start: null, end: null }
+): Promise<void> {
+  await db.query(`
+    UPDATE index_pages
+    SET updated_at = $2, publish_start = $3, publish_end = $4, indexed_at = now()
+    WHERE id = $1
+  `, [pageId, updatedAt, window.start, window.end])
 }
 
 export async function removePage (db: Pool, pageId: number): Promise<void> {
@@ -275,9 +293,38 @@ export async function replaceDocument (
   })
 }
 
-export async function removeDocument (db: Pool, id: number): Promise<void> {
-  // Chunks go with it: the foreign key cascades.
-  await db.query('DELETE FROM index_documents WHERE id = $1', [id])
+/**
+ * Forget an uploaded file: the row, its chunks — and the description a
+ * model wrote for it, which is the one piece of derived text kept
+ * outside the document's own rows.
+ *
+ * A description is keyed by the image's content hash so that the same
+ * picture is never paid for twice, which means the same row may belong
+ * to several copies of it. It is only dropped once no file left in the
+ * index has that content.
+ *
+ * The two deletes cannot be one statement: a data-modifying CTE sees the
+ * table as it was when the statement began, so the row being deleted
+ * would still look like a reason to keep the description.
+ *
+ * @returns how many descriptions went with it, for the log.
+ */
+export async function removeDocument (db: Pool, id: number): Promise<number> {
+  return await withTransaction(db, async client => {
+    // Chunks go with it: the foreign key cascades.
+    const { rows } = await client.query<{ source_hash: string }>(
+      'DELETE FROM index_documents WHERE id = $1 RETURNING source_hash', [id]
+    )
+    const contentHash = rows[0]?.source_hash ?? ''
+    if (contentHash.length === 0) { return 0 }
+
+    const { rowCount } = await client.query(`
+      DELETE FROM index_image_descriptions d
+      WHERE d.content_hash = $1
+        AND NOT EXISTS (SELECT 1 FROM index_documents doc WHERE doc.source_hash = $1)
+    `, [contentHash])
+    return rowCount ?? 0
+  })
 }
 
 /* ── which pages link to a file ────────────────────────────────────── */
@@ -478,4 +525,125 @@ export async function describeSpendToday (db: Pool): Promise<{ images: number, i
     inputTokens: Number(row?.input ?? 0),
     outputTokens: Number(row?.output ?? 0)
   }
+}
+
+/* ── keeping hidden and deleted content out ───────────────────────── */
+
+/**
+ * Pages the index holds that the wiki is no longer showing, because
+ * their publish window has closed or has not opened yet.
+ *
+ * Nothing fires an event when a date passes, so this is how they are
+ * found: reconciliation asks for them and takes their chunks away.
+ */
+export async function pagesOutsideWindow (db: Pool): Promise<Array<{ id: number, path: string, reason: string }>> {
+  const { rows } = await db.query<{ id: number, path: string, reason: string }>(`
+    SELECT id, path,
+           CASE WHEN publish_start > now() THEN 'not published until ' || publish_start::text
+                ELSE 'publishing ended ' || publish_end::text END AS reason
+    FROM index_pages
+    WHERE (publish_start IS NOT NULL AND publish_start > now())
+       OR (publish_end   IS NOT NULL AND publish_end   < now())
+  `)
+  return rows
+}
+
+/**
+ * Pages whose window has opened again but which have no chunks, so they
+ * are in the index and findable by nothing. Reconciliation re-queues
+ * them.
+ */
+export async function pagesInWindowWithoutChunks (db: Pool): Promise<number[]> {
+  // The empty hash is the marker emptyPage leaves. A page that genuinely
+  // has nothing to chunk would otherwise be queued on every pass.
+  const { rows } = await db.query<{ id: number }>(`
+    SELECT p.id
+    FROM index_pages p
+    WHERE p.source_hash = ''
+      AND (p.publish_start IS NULL OR p.publish_start <= now())
+      AND (p.publish_end   IS NULL OR p.publish_end   >= now())
+  `)
+  return rows.map(row => row.id)
+}
+
+/**
+ * Take a page's content away without forgetting the page exists.
+ *
+ * The row stays, so reconciliation can see from its dates when the page
+ * may be read again, and so it is not queued afresh every half hour. The
+ * source hash is blanked with the chunks, both to mark the row as
+ * holding nothing and so the next job never mistakes it for indexed.
+ */
+export async function emptyPage (db: Pool, pageId: number): Promise<number> {
+  const { rowCount } = await db.query('DELETE FROM index_chunks WHERE page_id = $1', [pageId])
+  // Guarded, so a page emptied an hour ago is not touched on every pass
+  // and does not keep moving the index's "last indexed" time forward.
+  await db.query(
+    "UPDATE index_pages SET source_hash = '', indexed_at = now() WHERE id = $1 AND source_hash <> ''",
+    [pageId]
+  )
+  return rowCount ?? 0
+}
+
+/**
+ * Descriptions nothing refers to any more.
+ *
+ * A description is kept against the image's content hash rather than its
+ * path, so two copies of one picture share it and deleting one copy must
+ * not take it from the other. Once no document has that content, the
+ * description — which was written by a model looking at an image the
+ * wiki no longer has — goes.
+ */
+export async function forgetOrphanedDescriptions (db: Pool): Promise<number> {
+  const { rowCount } = await db.query(`
+    DELETE FROM index_image_descriptions d
+    WHERE NOT EXISTS (
+      SELECT 1 FROM index_documents doc WHERE doc.source_hash = d.content_hash
+    )
+  `)
+  return rowCount ?? 0
+}
+
+/** What the index holds, for the status report. */
+export async function indexCounts (db: Pool): Promise<{
+  pages: number
+  pagesWithoutChunks: number
+  documents: number
+  skippedDocuments: number
+  chunks: number
+  imageDescriptions: number
+  imageTextRows: number
+  documentLinks: number
+}> {
+  const { rows } = await db.query<Record<string, string>>(`
+    SELECT
+      (SELECT count(*) FROM index_pages)::text AS pages,
+      (SELECT count(*) FROM index_pages p
+        WHERE NOT EXISTS (SELECT 1 FROM index_chunks c WHERE c.page_id = p.id))::text AS pages_without_chunks,
+      (SELECT count(*) FROM index_documents WHERE status = 'indexed')::text AS documents,
+      (SELECT count(*) FROM index_documents WHERE status <> 'indexed')::text AS skipped_documents,
+      (SELECT count(*) FROM index_chunks)::text AS chunks,
+      (SELECT count(*) FROM index_image_descriptions)::text AS image_descriptions,
+      (SELECT count(*) FROM index_image_text)::text AS image_text_rows,
+      (SELECT count(*) FROM index_document_links)::text AS document_links
+  `)
+  const row = rows[0] ?? {}
+  const n = (key: string): number => Number(row[key] ?? 0)
+  return {
+    pages: n('pages'),
+    pagesWithoutChunks: n('pages_without_chunks'),
+    documents: n('documents'),
+    skippedDocuments: n('skipped_documents'),
+    chunks: n('chunks'),
+    imageDescriptions: n('image_descriptions'),
+    imageTextRows: n('image_text_rows'),
+    documentLinks: n('document_links')
+  }
+}
+
+/** Which indexed pages and documents exist, for comparing with the wiki. */
+export async function indexedIds (db: Pool): Promise<{ pages: number[], documents: number[] }> {
+  const pages = await db.query<{ id: number }>('SELECT id FROM index_pages')
+  const documents = await db.query<{ id: number }>('SELECT id FROM index_documents')
+  return { pages: pages.rows.map(r => r.id), documents: documents.rows.map(r => r.id) }
 }

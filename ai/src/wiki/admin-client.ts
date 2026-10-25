@@ -26,6 +26,17 @@ export interface WikiPageSource extends WikiPageSummary {
   content: string
   /** The rendered HTML, used when the source is not Markdown. */
   render: string
+  /**
+   * Wiki.js's publish window. Empty strings when unset, which is the
+   * usual case. A page outside its window is invisible to readers even
+   * though `isPublished` is true, and nothing fires an event when the
+   * end date passes — see indexer/publish-window.ts.
+   *
+   * These are on `Page`, not on `PageListItem`, so only this query has
+   * them: reconciliation cannot see them from the page list.
+   */
+  publishStartDate: string
+  publishEndDate: string
 }
 
 /** One uploaded file, with the path Wiki.js serves it at. */
@@ -58,6 +69,7 @@ const SINGLE_QUERY = `
     pages {
       single(id: $id) {
         id path locale title description contentType isPublished updatedAt content render
+        publishStartDate publishEndDate
       }
     }
   }

@@ -93,6 +93,25 @@ module.exports = {
   },
 
   /**
+   * ADMIN ACTION: write what the index holds into the wiki's log.
+   *
+   * The admin UI only ever shows "Action completed.", so the answer goes
+   * to the log, where it can be read with
+   * `docker logs wiki-app | grep STORAGE/RAG`.
+   */
+  async indexStatus() {
+    WIKI.logger.info('(STORAGE/RAG) Asking the AI service for its index status...')
+    // Comparing means asking for the whole page list and walking every
+    // asset folder, which takes longer than an event notification.
+    const body = await this.notify('/internal/status', {}, { wait: true, timeoutMs: 30000, read: true })
+    if (!body) {
+      WIKI.logger.warn('(STORAGE/RAG) Index status: no answer from the AI service.')
+      return
+    }
+    WIKI.logger.info(`(STORAGE/RAG) Index status: ${_.get(body, 'summary', 'no summary')}`)
+  },
+
+  /**
    * Fire a page event and return at once. Nothing here is awaited by the
    * page save.
    */
@@ -130,14 +149,17 @@ module.exports = {
 
   /**
    * POST to the AI service. Errors are logged, never thrown.
+   *
+   * With `read`, the parsed reply is returned — or null if anything went
+   * wrong, which the caller has to allow for.
    */
-  async notify(path, body, { wait }) {
+  async notify(path, body, { wait, timeoutMs, read }) {
     const base = _.trimEnd(_.get(this, 'config.indexerUrl', 'http://ai:4000'), '/')
-    const timeoutMs = _.toInteger(_.get(this, 'config.timeoutMs', 2000)) || 2000
+    const limitMs = _.toInteger(timeoutMs || _.get(this, 'config.timeoutMs', 2000)) || 2000
 
     const send = async () => {
       const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), timeoutMs)
+      const timer = setTimeout(() => controller.abort(), limitMs)
       try {
         const resp = await fetch(`${base}${path}`, {
           method: 'POST',
@@ -147,20 +169,23 @@ module.exports = {
         })
         if (!resp.ok) {
           WIKI.logger.warn(`(STORAGE/RAG) ${path} returned ${resp.status}.`)
+          return null
         }
+        return read ? await resp.json() : null
       } catch (err) {
         WIKI.logger.warn(`(STORAGE/RAG) ${path} failed: ${err.message}`)
+        return null
       } finally {
         clearTimeout(timer)
       }
     }
 
     if (wait) {
-      await send()
-    } else {
-      send().catch(err => {
-        WIKI.logger.warn(`(STORAGE/RAG) ${path} failed: ${err.message}`)
-      })
+      return await send()
     }
+    send().catch(err => {
+      WIKI.logger.warn(`(STORAGE/RAG) ${path} failed: ${err.message}`)
+    })
+    return null
   }
 }

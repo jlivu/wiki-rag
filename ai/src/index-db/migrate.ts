@@ -175,8 +175,23 @@ const MIGRATIONS: Migration[] = [
       );
       CREATE INDEX IF NOT EXISTS index_image_text_page ON index_image_text (page_id);
     `
+  },
+  {
+    // A page can be published and still not visible: Wiki.js honours a
+    // publish window, and nothing fires an event when one closes. The
+    // dates are kept here so a search can exclude a page the moment it
+    // falls outside its window, without asking the wiki.
+    name: '011-publish-window',
+    sql: `
+      ALTER TABLE index_pages ADD COLUMN IF NOT EXISTS publish_start timestamptz;
+      ALTER TABLE index_pages ADD COLUMN IF NOT EXISTS publish_end   timestamptz;
+      CREATE INDEX IF NOT EXISTS index_pages_window ON index_pages (publish_start, publish_end);
+    `
   }
 ]
+
+/** Pages indexed before 011 have no dates, so they have to be read again. */
+export const WINDOW_MIGRATION = '011-publish-window'
 
 /** Applying this one means the chunks have to be built again. */
 export const ANCHOR_MIGRATION = '008-chunk-anchor'

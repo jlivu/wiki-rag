@@ -93,8 +93,38 @@ export function internalRoutes (indexer: Indexer): FastifyPluginAsync {
       return reply.code(202).send({ ok: true })
     })
 
-    app.get(`${INTERNAL_PREFIX}/status`, async () => {
-      return indexer.status()
+    /**
+     * What the index holds, measured against the wiki.
+     *
+     * `?compare=0` reports the index's own counts without asking Wiki.js
+     * for its page list and walking its asset folders.
+     */
+    app.get(`${INTERNAL_PREFIX}/status`, async (request) => {
+      const query = (request.query ?? {}) as { compare?: string }
+      const compare = query.compare !== '0' && query.compare !== 'false'
+      return await indexer.report(compare)
+    })
+
+    /** Admin > Storage > Index status, which logs the summary line. */
+    app.post(`${INTERNAL_PREFIX}/status`, async (_request, reply) => {
+      const report = await indexer.report(true)
+      return reply.send({ ok: true, summary: summarise(report), report })
     })
   }
+}
+
+/** One line an administrator can read in the wiki's own log. */
+function summarise (report: Awaited<ReturnType<Indexer['report']>>): string {
+  if (!report.enabled) { return 'the indexer is off' }
+  const wiki = report.wiki
+    ? `the wiki has ${report.wiki.pages} page(s) and ${report.wiki.files} file(s)`
+    : 'the wiki could not be asked what it holds'
+  const index = `the index has ${report.index.pages} page(s), ${report.index.documents} file(s) ` +
+    `and ${report.index.chunks} chunk(s)`
+  const last = report.lastReconcile
+    ? `last reconciled ${report.lastReconcile.at} (${report.lastReconcile.trigger}` +
+      `${report.lastReconcile.ok ? '' : ', which failed'})`
+    : 'no reconciliation has run yet'
+  const drift = report.drift.note.length > 0 ? `out of step: ${report.drift.note.join('; ')}` : 'in step'
+  return `${index}; ${wiki}; ${last}; ${drift}`
 }

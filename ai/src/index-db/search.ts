@@ -67,6 +67,12 @@ const OWNER_SQL = `
     FROM index_chunks c
     LEFT JOIN index_pages p     ON p.id = c.page_id
     LEFT JOIN index_documents d ON d.id = c.document_id
+    -- A page inside its publish window only. The window closes without an
+    -- event, so the index can be a day stale; filtering here makes it take
+    -- effect the moment it closes, whatever the indexer has caught up with.
+    WHERE c.page_id IS NULL
+       OR ((p.publish_start IS NULL OR p.publish_start <= now())
+       AND (p.publish_end   IS NULL OR p.publish_end   >= now()))
   )
 `
 

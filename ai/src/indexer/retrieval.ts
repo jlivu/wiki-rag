@@ -9,6 +9,11 @@
  * Pages and uploaded documents are ranked against each other in one list.
  * A page is checked by fetching it as the reader; a file by asking Wiki.js
  * for it as the reader, which applies `read:assets` to its path.
+ *
+ * That check is also how the index learns it is stale. Wiki.js answers 403
+ * for something the reader may not see and 404 for something that is not
+ * there, so a result the wiki no longer has is dropped and queued to be
+ * read again — see stale.ts.
  */
 import type { FastifyBaseLogger } from 'fastify'
 import type { Pool } from 'pg'
@@ -16,9 +21,10 @@ import type { Pool } from 'pg'
 import { chunkCount, searchChunks, type ChunkHit } from '../index-db/search.js'
 import { linkingPages, type LinkingPage } from '../index-db/store.js'
 import type { PermissionCache, ResourceKind } from '../wiki/permission-cache.js'
-import { WikiClient } from '../wiki/client.js'
+import { WikiClient, WikiError } from '../wiki/client.js'
 
 import { toVectorLiteral, type Embedder } from './embeddings.js'
+import { forgetStaleDocument, forgetStalePage } from './stale.js'
 
 /** Candidates taken from each of the two searches before fusion. */
 const PER_LIST = 30
@@ -42,6 +48,8 @@ interface RetrievedBase {
 
 export interface RetrievedPage extends RetrievedBase {
   kind: 'page'
+  /** The indexed page's id, so a stale hit can be queued by id. */
+  id: number
   locale: string
   /** The heading path of the best chunk, e.g. "Procedure › 5. Verify". */
   heading: string
@@ -70,6 +78,8 @@ export interface RetrievalResult {
   results: RetrievedItem[]
   /** How many pages or files the reader was not allowed to see. */
   filtered: number
+  /** How many the wiki no longer has. They are queued for removal. */
+  stale: number
   checked: number
 }
 
@@ -107,12 +117,19 @@ export class Retriever {
     // More candidates than will be returned, so enough survive the filter.
     const results: RetrievedItem[] = []
     let filtered = 0
+    let stale = 0
     let checked = 0
 
     for (const item of candidates) {
       if (results.length >= limit || checked >= MAX_CHECKS) { break }
       checked += 1
-      if (!await this.#canRead(reader, readerToken, item)) {
+      const access = await this.#canRead(reader, readerToken, item)
+      if (access === 'missing') {
+        stale += 1
+        await this.#forget(item)
+        continue
+      }
+      if (access === 'no') {
         filtered += 1
         continue
       }
@@ -123,31 +140,48 @@ export class Retriever {
       )
     }
 
-    return { results, filtered, checked }
+    return { results, filtered, stale, checked }
   }
 
   /** Whether this reader may open one candidate, page or file. */
-  async #canRead (reader: WikiClient, token: string | null, item: RetrievedItem): Promise<boolean> {
+  async #canRead (reader: WikiClient, token: string | null, item: RetrievedItem): Promise<Access> {
     const kind: ResourceKind = item.kind
     const locale = item.kind === 'page' ? item.locale : ''
     const cached = this.#permissions.get(token, kind, locale, item.path)
-    if (cached !== undefined) { return cached }
+    // The cache remembers yes and no. A hit that turned out not to exist
+    // was cached as "no", which is true for this reader either way, and
+    // its removal is already queued.
+    if (cached !== undefined) { return cached ? 'yes' : 'no' }
 
-    let readable = false
+    let access: Access = 'no'
     if (item.kind === 'page') {
       // The same request get_page makes, so the answer is the same answer.
       try {
         await reader.fetchPage(item.path, item.locale)
-        readable = true
-      } catch {
-        readable = false
+        access = 'yes'
+      } catch (err) {
+        access = err instanceof WikiError && err.status === 404 ? 'missing' : 'no'
       }
     } else {
-      readable = await reader.canReadAsset(item.path)
+      access = await reader.canReadAsset(item.path)
     }
 
-    this.#permissions.set(token, kind, locale, item.path, readable)
-    return readable
+    this.#permissions.set(token, kind, locale, item.path, access === 'yes')
+    return access
+  }
+
+  /** The wiki does not have this any more, so neither should the index. */
+  async #forget (item: RetrievedItem): Promise<void> {
+    try {
+      if (item.kind === 'page') {
+        await forgetStalePage(this.#db, item.id, item.path, item.locale, this.#log)
+      } else {
+        await forgetStaleDocument(this.#db, item.id, item.path, this.#log)
+      }
+    } catch (err) {
+      // Never let housekeeping break an answer.
+      this.#log.warn({ err, path: item.path }, 'a stale search result could not be queued for removal')
+    }
   }
 
   /**
@@ -172,6 +206,7 @@ export class Retriever {
       if (visible.length >= MAX_LINKS) { break }
       const item: RetrievedPage = {
         kind: 'page',
+        id: page.id,
         title: page.title,
         path: page.path,
         locale: page.locale,
@@ -188,6 +223,9 @@ export class Retriever {
     return visible
   }
 }
+
+/** yes: show it. no: this reader may not. missing: the wiki has not got it. */
+type Access = 'yes' | 'no' | 'missing'
 
 /** One entry per page or file, carrying its best chunks. */
 function group (hits: ChunkHit[]): RetrievedItem[] {
@@ -231,6 +269,7 @@ function group (hits: ChunkHit[]): RetrievedItem[] {
 
       return {
         kind: 'page' as const,
+        id: first.ownerId,
         title: first.title,
         path: first.path,
         locale: first.locale,

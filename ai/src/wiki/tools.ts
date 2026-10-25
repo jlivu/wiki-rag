@@ -8,6 +8,7 @@ import type { Pool } from 'pg'
 import type { SourceRegistry } from '../agent/sources.js'
 import { documentChunks, findDocumentByPath } from '../index-db/search.js'
 import type { Retriever } from '../indexer/retrieval.js'
+import { forgetStaleDocument } from '../indexer/stale.js'
 import type { ToolSpec } from '../providers/types.js'
 
 import { WikiClient, WikiError } from './client.js'
@@ -237,7 +238,8 @@ async function search (ctx: ToolContext, input: Record<string, unknown>): Promis
             source: 'index',
             results: found.results.length,
             checked: found.checked,
-            filtered: found.filtered
+            filtered: found.filtered,
+            ...(found.stale > 0 ? { stale: found.stale } : {})
           }
         }
       }
@@ -340,7 +342,13 @@ async function getDocument (ctx: ToolContext, input: Record<string, unknown>): P
   if (!document) {
     return fail(`There is no indexed file at "${path}". Use the path exactly as search_wiki returned it.`)
   }
-  if (!await ctx.client.canReadAsset(path)) {
+  const access = await ctx.client.canReadAsset(path)
+  if (access === 'missing') {
+    // The index is out of date, not the reader out of luck.
+    await forgetStaleDocument(ctx.index, document.id, path)
+    return fail(`There is no file at "${path}" any more; it has been dropped from the index.`)
+  }
+  if (access !== 'yes') {
     return fail('That file is not readable with your account.')
   }
   if (document.status !== 'indexed') {

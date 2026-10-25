@@ -24,6 +24,7 @@ import {
   type DocumentStatus, type IndexedDocument
 } from '../index-db/store.js'
 import type { WikiAsset, WikiAdminClient } from '../wiki/admin-client.js'
+import { WikiError } from '../wiki/client.js'
 
 import { toVectorLiteral, type Embedder } from './embeddings.js'
 import { ORIGIN_LABELS, readImage } from './image-job.js'
@@ -49,14 +50,14 @@ export async function runDocumentJob (
   options: DocumentJobOptions
 ): Promise<JobOutcome> {
   if (job.event === 'deleted') {
-    await removeDocument(db, job.entityId)
-    return { action: 'removed', reason: 'deleted' }
+    const descriptions = await removeDocument(db, job.entityId)
+    return { action: 'removed', reason: 'deleted', ...(descriptions > 0 ? { descriptions } : {}) }
   }
 
   const asset = await options.findAsset(job.entityId)
   if (!asset) {
-    await removeDocument(db, job.entityId)
-    return { action: 'removed', reason: 'gone' }
+    const descriptions = await removeDocument(db, job.entityId)
+    return { action: 'removed', reason: 'gone', ...(descriptions > 0 ? { descriptions } : {}) }
   }
 
   const base: Omit<IndexedDocument, 'docType' | 'sourceHash' | 'status' | 'reason'> = {
@@ -87,7 +88,23 @@ export async function runDocumentJob (
   }
 
   const indexed = await readDocument(db, asset.id)
-  const bytes = await wiki.downloadAsset(asset.path)
+
+  // The listing is cached for a few seconds, so a file deleted a moment
+  // ago can still be in it. The download is the moment we find out. It is
+  // recorded rather than removed, because the same 404 means "not there"
+  // and "Wiki.js will not serve this path", and a removed row would be
+  // queued again by the next reconciliation either way.
+  let bytes: Buffer
+  try {
+    bytes = await wiki.downloadAsset(asset.path)
+  } catch (err) {
+    if (err instanceof WikiError && err.status === 404) {
+      const reason = 'the wiki no longer serves this file'
+      await record(db, { ...base, docType: '', sourceHash: '', status: 'skipped', reason }, embedder.model)
+      return { action: 'skipped', reason }
+    }
+    throw err
+  }
   const sourceHash = createHash('sha256').update(bytes).digest('hex')
 
   // An image is read again every time it is queued, because some of its

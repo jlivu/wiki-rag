@@ -4,8 +4,9 @@
 import type { Pool } from 'pg'
 
 import {
-  documentIdsByPath, existingEmbeddings, imagePathsOnPage, readPage, removePage,
-  replaceDocumentLinks, replaceImageText, replacePage, touchPage, type PageImageText
+  documentIdsByPath, existingEmbeddings, imagePathsOnPage, readPage,
+  replaceDocumentLinks, replaceImageText, replacePage, touchPage,
+  type PageImageText
 } from '../index-db/store.js'
 import type { QueuedJob } from '../index-db/queue.js'
 import { htmlToMarkdown } from '../wiki/markdown.js'
@@ -13,12 +14,14 @@ import type { WikiAdminClient, WikiPageSource } from '../wiki/admin-client.js'
 
 import { chunkMarkdown, estimateTokens, hash } from './chunker.js'
 import { toVectorLiteral, type Embedder } from './embeddings.js'
+import { forgetPage, requeueImagesOf } from './forget.js'
 import { assetLinksFrom, assetPathOf, type LinkScanOptions } from './links.js'
 import { imagesIn } from './page-images.js'
+import { hiddenReason, isVisibleNow, readPublishWindow } from './publish-window.js'
 import { tocFromRender } from './toc.js'
 
 export interface JobOutcome {
-  action: 'indexed' | 'skipped' | 'removed'
+  action: 'indexed' | 'skipped' | 'removed' | 'hidden'
   chunks?: number
   embedded?: number
   /** How many uploaded files this page links to. */
@@ -38,19 +41,32 @@ export async function runJob (
   requeueDocuments?: (ids: number[]) => Promise<void>
 ): Promise<JobOutcome> {
   if (job.event === 'deleted') {
-    await removePage(db, job.entityId)
-    return { action: 'removed', reason: 'deleted' }
+    const images = await forgetPage(db, job.entityId, requeueDocuments)
+    return { action: 'removed', reason: 'deleted', ...(images > 0 ? { images } : {}) }
   }
 
   const page = await wiki.fetchPage(job.entityId)
   if (!page) {
-    await removePage(db, job.entityId)
-    return { action: 'removed', reason: 'gone' }
+    const images = await forgetPage(db, job.entityId, requeueDocuments)
+    return { action: 'removed', reason: 'gone', ...(images > 0 ? { images } : {}) }
   }
-  if (!page.isPublished) {
-    // An unpublished page is invisible to readers, so it leaves the index.
-    await removePage(db, job.entityId)
-    return { action: 'removed', reason: 'unpublished' }
+
+  // Published is not the same as visible: Wiki.js also honours a publish
+  // window, and nothing tells us when one closes.
+  const window = readPublishWindow(page)
+  if (!isVisibleNow({ isPublished: page.isPublished, ...window })) {
+    const reason = hiddenReason({ isPublished: page.isPublished, ...window })
+    if (!page.isPublished) {
+      // Unpublished pages are gone from the wiki's point of view.
+      const images = await forgetPage(db, job.entityId, requeueDocuments)
+      return { action: 'removed', reason, ...(images > 0 ? { images } : {}) }
+    }
+    // A window closes and opens again, so the page is kept but emptied:
+    // nothing derived from it can be found or cited, and reconciliation
+    // can see from the dates when to read it again.
+    await rememberHiddenPage(db, page, window)
+    const images = await requeueImagesOf(db, job.entityId, requeueDocuments)
+    return { action: 'hidden', reason, ...(images > 0 ? { images } : {}) }
   }
 
   const markdown = toMarkdown(page)
@@ -58,7 +74,9 @@ export async function runJob (
   const indexed = await readPage(db, job.entityId)
 
   if (indexed && indexed.sourceHash === sourceHash && indexed.path === page.path && indexed.locale === page.locale) {
-    await touchPage(db, job.entityId, page.updatedAt)
+    // The window is written even here: it is not part of the content, so
+    // an editor can close one without the page itself changing.
+    await touchPage(db, job.entityId, page.updatedAt, window)
     return { action: 'skipped', reason: 'unchanged' }
   }
 
@@ -91,7 +109,9 @@ export async function runJob (
     description: page.description ?? '',
     contentType: page.contentType,
     sourceHash,
-    updatedAt: page.updatedAt
+    updatedAt: page.updatedAt,
+    publishStart: window.start,
+    publishEnd: window.end
   }, rows, embedder.model)
 
   // Which files this page points at, for the "Linked from" line a document
@@ -118,6 +138,31 @@ export async function runJob (
     ...(linked.length > 0 ? { links: linked.length } : {}),
     ...(images.length > 0 ? { images: images.length } : {})
   }
+}
+
+/**
+ * Keep the row, lose the content. The dates are what reconciliation
+ * reads to know when the page may be indexed again.
+ */
+async function rememberHiddenPage (
+  db: Pool,
+  page: WikiPageSource,
+  window: { start: string | null, end: string | null }
+): Promise<void> {
+  await replacePage(db, {
+    id: page.id,
+    path: page.path,
+    locale: page.locale,
+    title: page.title ?? '',
+    description: page.description ?? '',
+    contentType: page.contentType,
+    // Not the real hash: the next job must not mistake this for indexed,
+    // and reconciliation reads it as "this row holds nothing".
+    sourceHash: '',
+    updatedAt: page.updatedAt,
+    publishStart: window.start,
+    publishEnd: window.end
+  }, [], '')
 }
 
 /** The alt text and captions this page gives the images it shows. */

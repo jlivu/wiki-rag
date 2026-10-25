@@ -29,3 +29,6 @@ actions:
   - handler: syncNow
     label: Reconcile now
     hint: Compare the assistant's index with the page list straight away, instead of waiting for the next scheduled sync.
+  - handler: indexStatus
+    label: Index status
+    hint: Write what the index holds — pages, files and chunks, against what the wiki has, and anything out of step — into the wiki's log. Read it with "docker logs wiki-app | grep STORAGE/RAG".

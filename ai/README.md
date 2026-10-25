@@ -323,6 +323,87 @@ docker logs wiki-ai | grep -E 'indexed a page|reconciled'
 docker exec wiki-ai-db psql -U wiki_ai -d wiki_ai -c 'SELECT * FROM index_pages'
 ```
 
+### When something leaves the wiki
+
+Nothing the wiki has stopped showing may be searched, quoted or cited, so
+every way content can disappear has a path out of the index.
+
+**A page.** Deleted, unpublished, moved or edited — the storage module
+posts the event and the job replaces or removes the page's chunks
+wholesale, so a section removed from a page takes its chunks with it.
+Measured in development: about 11 seconds, which is the ten-second
+debounce plus the job.
+
+**A publish window.** A page can be published and still not visible:
+Wiki.js honours `publishStartDate` and `publishEndDate` and shows an
+out-of-window page only to someone with write permission. Nothing fires
+an event when a date passes, so the dates are indexed with the page
+(`index_pages.publish_start`, `publish_end`) and used twice. Search
+filters on them in SQL, so a window that closes takes effect on the next
+question with no indexing at all; and reconciliation takes the chunks
+away from a page whose window has closed, keeping the row so it knows
+when the page may be read again. A window that opens again puts the page
+back. Leaving this to the reader-side permission check would not do: an
+administrator asking a question *can* see an out-of-window page, and
+would be cited it.
+
+**A file.** Deleted, renamed or replaced with a new version: the same
+event path, the same ten seconds. Deleting a file also takes the AI
+description written for it — unless another file still has the same
+bytes, because a description is cached by the image's content hash and
+shared between copies.
+
+**Text copied somewhere else.** An image is indexed with the alt text and
+captions of the pages that show it, so a page that is deleted, or that
+simply stops showing the image, leaves its words inside the image's
+chunks. Every image a page spoke for is therefore queued to be read again
+when the page changes or goes — from the job *and* from reconciliation,
+because a page can leave without an event. "Linked from" needs no such
+care: it is queried live from a table that cascades with the page.
+
+**While the service is down.** Nothing is lost, only delayed:
+reconciliation five seconds after startup compares both lists and removes
+what went missing, images included. Measured: a page and a file deleted
+with the service stopped were gone about seven seconds after it started.
+
+**Anything still slipping through.** Every search result is checked
+against Wiki.js as the reader who asked, and Wiki.js answers 403 for
+something that reader may not see and 404 for something that is not
+there. A 404 means the index is stale: the result is dropped before the
+model sees it, the page or file is queued to be read again — by id, with
+the admin key, so a page that was only moved has its path corrected
+rather than being thrown away — and a line goes into the log:
+
+```
+docker logs wiki-ai | grep 'no longer in the wiki'
+```
+
+Because a cached "yes" would hide exactly that check, a positive
+permission decision is cached for fifteen seconds rather than a minute,
+and anything leaving the index clears the cache outright.
+
+### Is the index in step with the wiki?
+
+```
+docker exec wiki-ai node -e "fetch('http://127.0.0.1:4000/internal/status').then(r=>r.json()).then(j=>console.log(JSON.stringify(j,null,2)))"
+```
+
+It reports what the index holds (pages, files, chunks, image
+descriptions, alt-text rows, links), what the wiki holds, the time and
+result of the last reconciliation, and a `drift.note` listing anything
+out of step — pages or files on one side only, pages with no chunks,
+pages held back by a publish window, jobs still queued. `inStep` is true
+when the two agree. Add `?compare=0` to skip asking the wiki, which is
+the only slow part.
+
+The same thing without a terminal: **Administration > Storage > AI
+Assistant Index > Index status**. Wiki.js only ever says "Action
+completed." in the browser, so the answer goes to the wiki's log:
+
+```
+docker logs wiki-app | grep 'STORAGE/RAG'
+```
+
 ### Uploaded documents
 
 Files uploaded through Wiki.js's asset manager are indexed alongside pages,
@@ -473,7 +554,8 @@ Wiki.js and 404s, while `wiki-app` can call
 | `POST /internal/asset-event` | the storage module, on every upload, rename or delete |
 | `POST /internal/reconcile`  | its scheduled sync, and "Reconcile now" |
 | `POST /internal/reindex`    | "Re-index everything" |
-| `GET  /internal/status`     | whoever wants to see queue depth and counts |
+| `GET  /internal/status`     | whoever wants the index measured against the wiki (`?compare=0` for counts only) |
+| `POST /internal/status`     | "Index status", which logs the one-line summary |
 
 ### How search_wiki answers
 
@@ -502,7 +584,10 @@ reader may not see. Every candidate page is therefore checked against
 Wiki.js **as the reader who asked**, with the same request `get_page` makes,
 before anything reaches the model — snippets included. More candidates are
 fetched than are returned so enough survive, and each reader's decisions are
-cached for a minute (keyed by a hash of their token, never the token).
+cached (keyed by a hash of their token, never the token): a refusal for a
+minute, a "yes" for only fifteen seconds, because a "yes" is also the claim
+that the page is still there. A check that comes back 404 means the index is
+stale rather than the reader unlucky — see "When something leaves the wiki".
 
 ### Turning it on in the wiki
 

@@ -28,6 +28,9 @@ export interface WikiPageHtml {
   html: string
 }
 
+/** Whether a reader may open a file — and, if not, whether it is there. */
+export type AssetAccess = 'yes' | 'no' | 'missing'
+
 export class WikiClient {
   readonly #baseUrl: string
   readonly #token: string | null
@@ -118,19 +121,24 @@ export class WikiClient {
    * in the wiki's cache, which the indexer's own download has already
    * warmed. Anything other than a plain 200 is treated as "no".
    */
-  async canReadAsset (path: string): Promise<boolean> {
+  async canReadAsset (path: string): Promise<AssetAccess> {
     const clean = path.replace(/^\/+/, '')
     try {
       const response = await this.#fetch(`/${encodeURI(clean)}`, {
         method: 'HEAD',
         redirect: 'manual'
       })
-      if (response.status !== 200) { return false }
+      // Wiki.js answers 403 when read:assets says no and 404 when the file
+      // is not there — and it clears a deleted file's cache, so a 404 here
+      // really does mean gone. The index needs to tell the two apart: one
+      // is this reader's business, the other is the index being stale.
+      if (response.status === 404) { return 'missing' }
+      if (response.status !== 200) { return 'no' }
       // A page extension lands in the page branch, which answers with HTML
       // whether or not the reader may see anything.
-      return !(response.headers.get('content-type') ?? '').startsWith('text/html')
+      return (response.headers.get('content-type') ?? '').startsWith('text/html') ? 'no' : 'yes'
     } catch {
-      return false
+      return 'no'
     }
   }
 

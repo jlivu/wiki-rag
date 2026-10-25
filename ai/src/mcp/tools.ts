@@ -11,6 +11,7 @@ import type { Pool } from 'pg'
 
 import { documentChunks, findDocumentByPath } from '../index-db/search.js'
 import type { Retriever } from '../indexer/retrieval.js'
+import { forgetStaleDocument } from '../indexer/stale.js'
 import { WikiClient, WikiError } from '../wiki/client.js'
 import { createPage } from '../wiki/pages.js'
 import { AI_DRAFT_TAG } from '../../shared/index.js'
@@ -130,7 +131,12 @@ export async function getDocument (
     return error(`There is no indexed file at "${path}". Use the path exactly as search_wiki returned it.`)
   }
   // The key's own access, checked against Wiki.js, exactly as for a page.
-  if (!await ctx.wiki.canReadAsset(path)) {
+  const access = await ctx.wiki.canReadAsset(path)
+  if (access === 'missing') {
+    await forgetStaleDocument(ctx.index, document.id, path)
+    return error(`There is no file at /${path} any more; it has been dropped from the index.`)
+  }
+  if (access !== 'yes') {
     return error(`This key is not allowed to read /${path}.`)
   }
   if (document.status !== 'indexed') {
