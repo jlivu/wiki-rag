@@ -65,6 +65,10 @@ services:
     expose:
       - "3000"
     volumes:
+      # Shadows the image's own config.yml. Same file plus offline: true,
+      # which stops the version check, the locale calls and telemetry
+      # reaching requarks.io. See "What leaves this Mac" in README.md.
+      - ./config.prod.yml:/wiki/config.yml:ro
       - wiki-data:/wiki/data
     logging:
       driver: json-file

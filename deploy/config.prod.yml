@@ -1,0 +1,48 @@
+# Wiki.js configuration for production, mounted over the image's own
+# /wiki/config.yml.
+#
+# It is the image's file (dev/build/Dockerfile copies dev/build/config.yml)
+# with one line added at the end: offline: true. Everything above it is
+# copied verbatim, including the $(VAR) placeholders, which Wiki.js fills
+# from the environment at startup — docker-compose.prod.yml sets DB_*, and
+# the rest resolve the way they already did.
+#
+# Keep this file in step with dev/build/config.yml when rebasing: that file
+# is upstream's and this one shadows it.
+
+port: 3000
+bindIP: 0.0.0.0
+db:
+  type: $(DB_TYPE)
+  host: '$(DB_HOST)'
+  port: $(DB_PORT)
+  user: '$(DB_USER)'
+  pass: '$(DB_PASS)'
+  db: $(DB_NAME)
+  storage: $(DB_FILEPATH)
+  ssl: $(DB_SSL)
+ssl:
+  enabled: $(SSL_ACTIVE)
+  port: 3443
+  provider: letsencrypt
+  domain: $(LETSENCRYPT_DOMAIN)
+  subscriberEmail: $(LETSENCRYPT_EMAIL)
+logLevel: $(LOG_LEVEL:info)
+logFormat: $(LOG_FORMAT:default)
+ha: $(HA_ACTIVE)
+
+# Offline mode. Wiki.js's single switch for everything it would otherwise
+# fetch from requarks.io:
+#   - skips the syncGraphUpdates job (the version check)
+#   - skips the syncGraphLocales job (the list of available languages)
+#   - refuses to send telemetry, whatever the admin setting says
+# Both jobs are marked offlineSkip in server/app/data.yml; the telemetry
+# check is in server/core/telemetry.js.
+#
+# The cost: new languages can no longer be downloaded from the admin area.
+# English is built in, so this only matters if another language is wanted
+# later — unset this, restart, install it, set it again.
+#
+# This is production only. Development keeps the image default so the
+# behaviour upstream expects stays testable.
+offline: true

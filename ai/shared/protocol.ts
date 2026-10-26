@@ -3,6 +3,7 @@
  * app talks to the wiki page around it.
  */
 import { readPageContext, type PageContext } from './components.js'
+import { isEffortLevel, type EffortLevel } from './models.js'
 
 /** Served by the Fastify service, behind the reverse proxy. */
 export const HEALTH_PATH = '/ai/health'
@@ -18,6 +19,14 @@ export const MCP_PATH = '/ai/mcp'
  */
 export interface ForwardedProps {
   page?: PageContext
+  /**
+   * Which model the reader picked, as an id from GET /ai/api/models. The
+   * server looks it up in its own list and refuses anything else, so this
+   * is a choice among the allowed, never a model name from the browser.
+   */
+  model?: string
+  /** How hard it should work, as a level that model says it supports. */
+  effort?: string
 }
 
 /** Never throws: a malformed page context just means the agent has none. */
@@ -30,6 +39,35 @@ export function readForwardedPage (value: unknown): PageContext | undefined {
   } catch {
     return undefined
   }
+}
+
+/** The reader's model choice, or undefined to use the server's default. */
+export function readForwardedModel (value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null) { return undefined }
+  const id = (value as { model?: unknown }).model
+  if (typeof id !== 'string') { return undefined }
+  const trimmed = id.trim()
+  return trimmed.length > 0 && trimmed.length <= 120 ? trimmed : undefined
+}
+
+/**
+ * What the browser asked for: nothing, a level, or something else.
+ *
+ * "Nothing" and "something else" have to be told apart. Reading an
+ * unrecognised value as "nothing" would quietly run at the default
+ * instead of what was asked for, and the run would look to the reader
+ * as if their choice had been honoured.
+ */
+export type ForwardedEffort =
+  | { kind: 'absent' }
+  | { kind: 'level', level: EffortLevel }
+  | { kind: 'unknown' }
+
+export function readForwardedEffort (value: unknown): ForwardedEffort {
+  if (typeof value !== 'object' || value === null) { return { kind: 'absent' } }
+  const effort = (value as { effort?: unknown }).effort
+  if (effort === undefined || effort === null) { return { kind: 'absent' } }
+  return isEffortLevel(effort) ? { kind: 'level', level: effort } : { kind: 'unknown' }
 }
 
 /** What GET /ai/health answers. */

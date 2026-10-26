@@ -22,6 +22,7 @@ import {
   PANEL_TOOL_SCHEMAS,
   isPanelToolName,
   parsePanelComponent,
+  type EffortLevel,
   type PageContext
 } from '../../shared/index.js'
 import type { ChatMessage, ChatProvider, ProviderToolCall, ToolSpec } from '../providers/types.js'
@@ -44,6 +45,8 @@ export interface WikiAgentOptions {
   isAborted: () => boolean
   signal: AbortSignal
   maxToolSteps: number
+  /** How hard the model works, as the reader chose. */
+  effort: EffortLevel
   maxOutputTokens: number
 }
 
@@ -83,6 +86,15 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
   const rewriter = new CitationRewriter(toolContext.sources)
   let openTextId: string | null = null
   let lastTextId: string | null = null
+  /**
+   * Whether anything at all reached the reader.
+   *
+   * A local model can end its turn having produced only thinking, which
+   * the OpenAI-compatible stream keeps out of `content` — so the run
+   * finishes cleanly and the panel shows an empty bubble. Better to say
+   * what happened than to show nothing.
+   */
+  let saidSomething = false
 
   const openText = (): string => {
     if (openTextId === null) {
@@ -93,6 +105,7 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
   }
   const say = (chunk: string) => {
     if (chunk.length === 0) { return }
+    saidSomething = true
     const messageId = openText()
     emit({ type: EventType.TEXT_MESSAGE_CONTENT, messageId, delta: chunk })
   }
@@ -127,6 +140,7 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
       messages,
       tools,
       maxOutputTokens: opts.maxOutputTokens,
+      effort: opts.effort,
       signal: opts.signal
     })) {
       if (isAborted()) { return stats }
@@ -205,6 +219,27 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
       messages.push(toolResult(call, JSON.stringify({ error })))
       stats.toolCalls.push({ name: call.name, ms: Date.now() - startedAt, ok: false, error })
     }
+  }
+
+  // Nothing written and no card drawn: the model finished its turn
+  // without answering. Seen with the local models, which sometimes spend
+  // a turn thinking and stop, and with one that ran its tool budget out
+  // searching. An empty bubble looks like a bug in the panel, so the
+  // reader is told what happened and what to do about it.
+  const drewCard = stats.toolCalls.some(
+    call => typeof call.name === 'string' && (PANEL_TOOL_NAMES as readonly string[]).includes(call.name)
+  )
+  if (!saidSomething && !drewCard) {
+    opts.tools.log.warn(
+      { provider: provider.id, model: provider.model, steps: stats.steps, stopReason: stats.stopReason },
+      'the model finished without answering'
+    )
+    say(
+      stats.stopReason === 'tool_use'
+        ? '*I kept searching and never settled on an answer. Try asking in fewer words, or pick a different model under the message box.*'
+        : '*This model returned an empty answer. Ask again, or pick a different model under the message box.*'
+    )
+    closeText()
   }
 
   // An answer drawn from the wiki never ends without its sources. The

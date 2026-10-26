@@ -3,6 +3,7 @@ import Fastify from 'fastify'
 import { agentRoutes } from './routes/agent.js'
 import { internalRoutes } from './routes/internal.js'
 import { mcpRoutes } from './routes/mcp.js'
+import { modelRoutes } from './routes/models.js'
 import { pageRoutes } from './routes/pages.js'
 import { panelRoutes } from './routes/panel.js'
 import { speechAvailable, transcribeRoutes } from './routes/transcribe.js'
@@ -49,6 +50,7 @@ const indexer = new Indexer(config, app.log)
 await app.register(agentRoutes(config, indexer))
 await app.register(internalRoutes(indexer))
 await app.register(mcpRoutes(config, indexer))
+await app.register(modelRoutes(config))
 await app.register(pageRoutes(config))
 await app.register(transcribeRoutes(config))
 await app.register(panelRoutes)

@@ -6,15 +6,31 @@
  * never returned by a route and never sent to the browser.
  */
 
+import { formatAnthropicModel } from './providers/format.js'
+import { EFFORT_LEVELS, type EffortChoice, type EffortLevel, type ModelChoice } from '../shared/index.js'
+
 export type ProviderId = 'anthropic' | 'ollama' | 'mock'
 
-export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+export type Effort = EffortLevel
 
 export interface LlmConfig {
+  /** The default model's provider, and the mock switch. */
   provider: ProviderId
+  /** The default model, which is the first entry in `models`. */
   model: string
+  /**
+   * Every model a reader may pick, in the order the panel lists them.
+   * Never empty, and the first is the default.
+   */
+  models: ModelChoice[]
   apiKey: string
   ollamaUrl: string
+  /**
+   * Let a local model think before answering. On, because the models
+   * that are any good at tool calling need it: see "Local models" in
+   * ai/README.md for what turning it off does to each.
+   */
+  ollamaThinking: boolean
   maxToolSteps: number
   maxOutputTokens: number
   effort: Effort
@@ -98,10 +114,168 @@ const DEFAULT_MODELS: Record<ProviderId, string> = {
   mock: 'mock'
 }
 
-const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max']
+/**
+ * The one-line note under a model's name in the picker.
+ *
+ * Kept here rather than in MODELS so the setting stays a plain list of
+ * model names: this is prose for a reader, not configuration, and it can
+ * be reworded without anyone editing an environment file.
+ */
+const MODEL_NOTES: Record<string, string> = {
+  'claude-sonnet-5-5': 'Balanced — the default',
+  'claude-haiku-5-5': 'Fastest and cheapest',
+  // Measured, not assumed: three times Sonnet's price and twice its
+  // time, for the cards Sonnet already draws one level up. See "Is Opus
+  // worth it here" in ai/README.md.
+  'claude-opus-5-5': 'Three times Sonnet\u2019s price for the same answers here',
+  'gemma4:e4b': 'Private, slower — and less reliable'
+}
+
+/**
+ * How hard each model will work, and what that costs.
+ *
+ * Anthropic sets this with `output_config.effort`, and every current
+ * Claude model takes all five levels (the API's own default is `high`
+ * for Sonnet 5.5 and `medium` for Haiku 5.5 — we name ours either way,
+ * so the panel and the bill agree).
+ *
+ * The notes are measured on this wiki's own three test questions, not
+ * guessed from a multiplier: see "Effort" in ai/README.md. They say what
+ * actually changed, which on a small wiki is mostly "nothing, slower".
+ */
+const ANTHROPIC_EFFORTS: EffortChoice[] = [
+  { id: 'low', label: 'Low', note: 'Quickest; answered all three of our test questions' },
+  { id: 'medium', label: 'Medium', note: 'A little fuller than Low, for about 1.2× the cost' },
+  { id: 'high', label: 'High', note: 'Adds the troubleshooting table to a how-to answer' },
+  { id: 'xhigh', label: 'Extra high', note: 'Fuller again; about 1.7× what Low costs' },
+  { id: 'max', label: 'Maximum', note: 'About 4× slower and 5× the cost, no better answer here' }
+]
+
+/**
+ * Ollama has no effort dial, only thinking on or off, so a local model
+ * that can think is offered the two ends and nothing in between. One
+ * that cannot gets no row at all.
+ */
+const OLLAMA_EFFORTS: EffortChoice[] = [
+  { id: 'low', label: 'Low', note: 'Thinking off: quicker, but it stops drawing the cards' },
+  { id: 'high', label: 'High', note: 'Thinking on, which is the only way it draws them' }
+]
+
+/** What the administrator allows, and what they would rather have. */
+interface EffortLimits {
+  /** EFFORTS, or null for "every level the model supports". */
+  allowed: Set<EffortLevel> | null
+  /** LLM_EFFORT: the level to start on, where the model has it. */
+  preferred: EffortLevel
+}
+
+/**
+ * EFFORTS narrows the menu; LLM_EFFORT picks the level inside it.
+ *
+ * Read per call rather than threaded through, because the model list is
+ * built once at startup and this keeps `toChoice` to its own job.
+ */
+function readEffortLimits (env: NodeJS.ProcessEnv): EffortLimits {
+  const listed = readList(env.EFFORTS)
+  let allowed: Set<EffortLevel> | null = null
+  if (listed) {
+    for (const name of listed) {
+      if (!EFFORT_LEVELS.includes(name.toLowerCase() as EffortLevel)) {
+        throw new Error(`EFFORTS must name levels from ${EFFORT_LEVELS.join(', ')} (got "${name}")`)
+      }
+    }
+    allowed = new Set(listed.map(name => name.toLowerCase() as EffortLevel))
+  }
+
+  const preferred = readEffort(env.LLM_EFFORT)
+  if (allowed && !allowed.has(preferred)) {
+    throw new Error(`LLM_EFFORT is "${preferred}", which EFFORTS does not allow`)
+  }
+  return { allowed, preferred }
+}
+
+/**
+ * Which levels a model offers, and which it starts on.
+ *
+ * Three things decide it, in order: what the model can do, what EFFORTS
+ * allows, and what LLM_EFFORT asks for. Narrowing to nothing is allowed
+ * — the menu then has no Effort row — but the run still needs a level,
+ * so the model's own default is kept for the server to use.
+ */
+function effortsFor (provider: ProviderId, model: string, limits: EffortLimits): {
+  efforts: EffortChoice[]
+  defaultEffort: EffortLevel | null
+} {
+  // Every current Claude model takes all five of Anthropic's levels.
+  const supported: EffortChoice[] = provider === 'anthropic'
+    ? ANTHROPIC_EFFORTS
+    : provider === 'ollama' && !OLLAMA_MODELS_WITHOUT_THINKING.includes(model)
+      ? OLLAMA_EFFORTS
+      : []
+  if (supported.length === 0) { return { efforts: [], defaultEffort: null } }
+
+  const own: EffortLevel = provider === 'anthropic' ? 'medium' : 'high'
+  const efforts = limits.allowed
+    ? supported.filter(level => limits.allowed?.has(level.id) === true)
+    : supported
+
+  // The level a reader gets without choosing — and the one the menu
+  // marks Recommended, so the badge always names what they would get.
+  const settle = (from: EffortChoice[]): EffortLevel =>
+    from.some(level => level.id === limits.preferred)
+      ? limits.preferred
+      : from.some(level => level.id === own)
+        ? own
+        : from[0]?.id ?? own
+
+  return efforts.length === 0
+    // EFFORTS left this model nothing: no choice to offer, and the run
+    // falls back to what the model itself would have done.
+    ? { efforts: [], defaultEffort: own }
+    : { efforts, defaultEffort: settle(efforts) }
+}
+
+/**
+ * Local models with no thinking control, by name. Ollama reports this
+ * per model (`ollama show <model>`), but asking at startup would make
+ * the configuration depend on a service that may not be running, so the
+ * exceptions are listed instead and everything else is assumed to think.
+ */
+const OLLAMA_MODELS_WITHOUT_THINKING: readonly string[] = []
+
+const GROUP_NOTES: Record<ProviderId, string> = {
+  anthropic: 'Answers in the cloud',
+  ollama: 'Private, slower — nothing leaves this Mac',
+  mock: 'Canned replies, for working on the panel'
+}
+
+/**
+ * The picker's list when MODELS is unset.
+ *
+ * Sonnet is the default and Haiku the cheap one; the local model is here
+ * so the choice exists on a machine with Ollama, and shows as
+ * unavailable on one without. It is listed knowing it is the weaker
+ * option — "Local models" in ai/README.md has the measurements — because
+ * a reader who wants nothing to leave the Mac can pick it and switch
+ * back in one click. Drop it from MODELS to take it off the menu.
+ */
+const DEFAULT_MODEL_LIST = [
+  'anthropic:claude-sonnet-5-5',
+  'anthropic:claude-haiku-5-5',
+  'ollama:gemma4:e4b'
+]
+// claude-opus-5-5 is supported and described in MODEL_NOTES, but is not
+// in the list above: it is three times Sonnet's price for no better
+// answer on this wiki (see "What effort is worth here" in ai/README.md),
+// so an administrator has to ask for it by name in MODELS.
 
 export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
-  const provider = readProvider(env.LLM_PROVIDER)
+  const models = readModels(env)
+  // The first entry is the default, and everything that used to read
+  // LLM_PROVIDER/LLM_MODEL now follows it, so there is one answer to
+  // "which model is this" whether or not MODELS is set.
+  const fallback = models[0] as ModelChoice
+  const provider = fallback.provider as ProviderId
   return {
     host: env.HOST ?? '0.0.0.0',
     port: readInt(env.PORT, 4000),
@@ -119,9 +293,11 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
     },
     llm: {
       provider,
-      model: nonEmpty(env.LLM_MODEL) ?? DEFAULT_MODELS[provider],
+      model: fallback.model,
+      models,
       apiKey: env.ANTHROPIC_API_KEY ?? '',
       ollamaUrl: trimSlash(env.OLLAMA_URL ?? 'http://host.docker.internal:11434'),
+      ollamaThinking: readBool(env.OLLAMA_THINKING, true),
       maxToolSteps: readInt(env.MAX_TOOL_STEPS, 6),
       maxOutputTokens: readInt(env.MAX_OUTPUT_TOKENS, 8192),
       effort: readEffort(env.LLM_EFFORT),
@@ -161,6 +337,79 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
   }
 }
 
+/**
+ * MODELS: which models a reader may pick, in order, the default first.
+ *
+ *   MODELS=anthropic:claude-sonnet-5-5,anthropic:claude-haiku-5-5,ollama:qwen3.5
+ *
+ * Left unset it is the single model LLM_PROVIDER and LLM_MODEL name, so
+ * an older ai/.env keeps working and the picker simply has one entry.
+ * An explicit LLM_PROVIDER=mock wins over MODELS: that switch exists to
+ * work on the panel without calling a model at all, and a list of real
+ * models must not quietly undo it.
+ */
+function readModels (env: NodeJS.ProcessEnv): ModelChoice[] {
+  // Only an *explicit* LLM_PROVIDER=mock turns the models off. The
+  // setting's own default is mock, and treating that the same would mean
+  // a MODELS line was silently ignored whenever LLM_PROVIDER was absent
+  // — canned replies in place of the models the administrator listed.
+  if ((env.LLM_PROVIDER ?? '').trim().toLowerCase() === 'mock') {
+    return [toChoice('mock', 'mock', env)]
+  }
+
+  const listed = readList(env.MODELS)
+  const chosen = nonEmpty(env.LLM_MODEL)
+
+  // Nothing configured at all is a fresh checkout with no key: canned
+  // replies are the only thing that can work.
+  if (!listed && !chosen && !nonEmpty(env.LLM_PROVIDER)) {
+    return [toChoice('mock', 'mock', env)]
+  }
+
+  const provider = readProvider(env.LLM_PROVIDER ?? 'anthropic')
+  // MODELS wins outright. Without it, the built-in list with LLM_MODEL
+  // moved to the front, since that setting has always named the model
+  // that answers and now names the one the panel starts on.
+  const entries = listed ?? (
+    chosen === undefined
+      ? DEFAULT_MODEL_LIST
+      : [`${provider}:${chosen}`, ...DEFAULT_MODEL_LIST.filter(entry => entry !== `${provider}:${chosen}`)]
+  )
+  const models: ModelChoice[] = []
+  for (const entry of entries) {
+    const at = entry.indexOf(':')
+    if (at < 1) {
+      throw new Error(`MODELS entries look like provider:model (got "${entry}")`)
+    }
+    const name = entry.slice(0, at).trim().toLowerCase()
+    const model = entry.slice(at + 1).trim()
+    if (name !== 'anthropic' && name !== 'ollama') {
+      throw new Error(`MODELS can only name anthropic or ollama models (got "${entry}")`)
+    }
+    if (model.length === 0) {
+      throw new Error(`MODELS entry "${entry}" names no model`)
+    }
+    const choice = toChoice(name, model, env)
+    // A duplicate would give the picker two entries with one id.
+    if (!models.some(other => other.id === choice.id)) { models.push(choice) }
+  }
+
+  if (models.length > 0) { return models }
+  return [toChoice(provider, DEFAULT_MODELS[provider], env)]
+}
+
+function toChoice (provider: ProviderId, model: string, env: NodeJS.ProcessEnv): ModelChoice {
+  return {
+    id: `${provider}:${model}`,
+    provider,
+    model,
+    label: provider === 'anthropic' ? formatAnthropicModel(model) : model,
+    group: provider === 'anthropic' ? 'Cloud' : provider === 'ollama' ? 'On this Mac' : 'Dev',
+    note: MODEL_NOTES[model] ?? GROUP_NOTES[provider],
+    ...effortsFor(provider, model, readEffortLimits(env))
+  }
+}
+
 function readSpeechProvider (value: string | undefined): 'whispercpp' | 'off' {
   const name = (value ?? 'whispercpp').trim().toLowerCase()
   if (name !== 'whispercpp' && name !== 'off') {
@@ -194,6 +443,7 @@ export function describeConfig (config: Config): Record<string, unknown> {
   return {
     provider: config.llm.provider,
     model: config.llm.model,
+    models: config.llm.models.map(choice => choice.id),
     maxToolSteps: config.llm.maxToolSteps,
     maxOutputTokens: config.llm.maxOutputTokens,
     effort: config.llm.effort,
@@ -227,8 +477,8 @@ function readProvider (value: string | undefined): ProviderId {
 
 function readEffort (value: string | undefined): Effort {
   const name = (value ?? 'medium').trim().toLowerCase() as Effort
-  if (EFFORTS.includes(name)) { return name }
-  throw new Error(`LLM_EFFORT must be one of ${EFFORTS.join(', ')} (got "${value}")`)
+  if (EFFORT_LEVELS.includes(name)) { return name }
+  throw new Error(`LLM_EFFORT must be one of ${EFFORT_LEVELS.join(', ')} (got "${value}")`)
 }
 
 function readList (value: string | undefined): string[] | undefined {

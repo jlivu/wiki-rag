@@ -148,13 +148,268 @@ Nothing else in the agent knows which is running.
 - **Ollama** (`ollama.ts`) — its OpenAI-compatible API, through the `openai`
   client. Any locally pulled model with the `tools` capability works
   (`ollama show <model>` lists them). It is much slower than the cloud on this
-  hardware.
+  hardware, and much worse at drawing the cards — see *Local models*.
 - **Mock** (`LLM_PROVIDER=mock`) — the canned keyword replies from step 2, for
   UI work with no model calls and no cost: `restore`, `error 3201`, `compare`,
   `sources`, `draft`, and a short text answer for anything else.
 
-The status chip in the panel header names the model and where it runs:
-"Claude Sonnet 5.5 · Cloud", "qwen3.5 · Local", "Mock · Dev".
+The status chip in the panel header names the model, and says where it runs
+when that is not obvious: "Claude Sonnet 5.5", "gemma4:e4b · Local",
+"Mock · Dev".
+
+## Choosing the model and the effort, from the panel
+
+Under the message box, beside the note about checking answers, a small
+button shows what will answer the next question — "Sonnet 5.5 · Medium".
+It opens a menu **upwards**, because it sits at the bottom of the panel:
+
+- the model in use, with its one-line description and a tick;
+- an **Effort** row showing the current level;
+- a **More models** row.
+
+Either row opens a submenu that **replaces the menu's contents**, with a
+back control at the top, rather than opening beside it: the panel is
+400px wide and this app cannot draw outside its own frame.
+
+The effort submenu explains the trade in one line, then lists the levels
+that model supports, with **Recommended** on its default and a tick on
+the current one. A model with no effort control has no Effort row at
+all. More models lists the rest of the allowlist under **Cloud** and **On
+this Mac**, each with a description, and anything that cannot answer
+right now greyed out with the reason — "Ollama is not running on this
+Mac", "Not downloaded — run: ollama pull …", "No API key on the server".
+
+Arrow keys move, Enter chooses, Escape leaves a submenu and then closes
+the menu; the rows are `menuitem`/`menuitemradio` and an unavailable one
+is `aria-disabled` and announces its reason instead of its description.
+
+The choice applies from the next message and is kept in that browser
+(`localStorage`). The effort is remembered **per model**, because the
+levels do not mean the same thing from one to the next — "high" on a
+local model means thinking is on. The default is Claude Sonnet 5.5 at
+Medium. The chip in the panel header keeps naming the model and where it
+runs: "Sonnet 5.5 · Cloud", "gemma4:e4b · Local".
+
+### MODELS, and the two older settings
+
+`MODELS` in `ai/.env` is the allowlist: `provider:model`, comma separated, in
+the order the menu shows them. **The first entry is the default** — what a
+reader who has not chosen gets.
+
+```
+MODELS=anthropic:claude-sonnet-5-5,anthropic:claude-haiku-5-5,ollama:gemma4:e4b
+```
+
+Once `MODELS` is set it is the whole story, and the two settings that came
+before it mostly step aside:
+
+| | With `MODELS` set | With `MODELS` unset |
+| --- | --- | --- |
+| **`MODELS`** | the list, and its first entry is the default | — |
+| **`LLM_MODEL`** | **ignored** | the default model |
+| **`LLM_PROVIDER`** | **not needed** — each entry names its own provider. Only `LLM_PROVIDER=mock` still does anything, and it overrides `MODELS` | picks the provider for `LLM_MODEL` |
+
+So with an explicit `MODELS` line you can delete `LLM_MODEL`, and you can
+delete `LLM_PROVIDER` unless you want the mock agent. Both are kept in
+`.env.example` because they are still the short way to run one model.
+
+`LLM_PROVIDER=mock` keeps the canned keyword replies from step 2 and
+overrides `MODELS`, so UI work costs nothing. Only an *explicit* `mock`
+does that: the setting's own default is `mock`, and treating an absent
+`LLM_PROVIDER` the same way would have meant a `MODELS` line being
+silently ignored.
+
+Which models are supported is in `.env.example`, with a line on each.
+`claude-opus-5-5` is among them and is deliberately **not** in the
+default list — see *Is Opus worth it here* below.
+
+`GET /ai/api/models` returns each model's description, availability and the
+effort levels it supports. The browser only ever sends an **id** and a
+**level** from that answer back: a run naming anything else is refused with
+`UNKNOWN_MODEL` or `UNKNOWN_EFFORT` and logged, so no one can reach a model
+the administrator did not list or a level the model does not have. Each run's
+log line names the model, the effort, and whether the reader chose each.
+
+The choice affects answers only. Embeddings (`EMBED_MODEL`) and image
+descriptions (`IMAGE_DESCRIBER_MODEL`) keep their own settings.
+
+### How effort is set
+
+Anthropic's own dial, `output_config.effort`, which is generally available
+and takes `low`, `medium`, `high`, `xhigh` and `max`. Every current Claude
+model accepts all five; the API's own default is `high` on Sonnet 5.5 and
+`medium` on Haiku and Opus 5.5, so this service always names the level
+rather than leaving it out.
+
+Ollama has no such scale — only thinking on or off — so a local model that
+can think is offered the two ends of the scale and nothing in between
+(`reasoning_effort: 'none'` for Low), and one that cannot think is offered
+nothing and loses the row.
+
+**`LLM_EFFORT` sets the default level.** It is what a reader gets before
+they choose, and what the menu marks *Recommended*, so the badge always
+names what they would actually get. A model that does not have that level
+— a local one has only low and high — falls back to its own default. The
+reader's own choice is remembered per model in their browser and wins over
+it.
+
+**`EFFORTS` limits which levels the menu may offer at all**, applied on top
+of what each model supports:
+
+```
+EFFORTS=low,medium,high     # hide the two dearest levels
+EFFORTS=medium              # no choice at all; the row disappears
+EFFORTS=                    # every level the model has — the default
+```
+
+It is enforced by the server, not just hidden in the menu: the route
+validates the run against the narrowed list, so a request naming a level
+outside it is refused with `UNKNOWN_EFFORT`, exactly as a forged one is.
+`LLM_EFFORT` has to be one of the allowed levels or the service refuses to
+start, and an unknown name in either setting is refused at startup rather
+than ignored. If the list leaves a model with nothing — `EFFORTS=medium`
+and a local model that only has low and high — that model keeps no Effort
+row and runs at its own default.
+
+### What effort is worth here
+
+Every level of every model, against the three questions from step 3a, on
+this wiki's three pages. The time and tokens are the total for all three
+answers; the cost is at the published prices (Sonnet 5.5 $2 / $10 per MTok,
+cache write $2.50, cache read $0.10; Haiku 5.5 $0.10 / $0.50, $0.125,
+$0.01).
+
+| Model | Effort | 3 answers | Input + cache read | Output | Cost | vs Low |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Sonnet 5.5** | Low | 27.3 s | 45,931 | 1,889 | $0.0351 | 1.0× |
+| | Medium | 23.6 s | 51,577 | 2,155 | $0.0417 | 1.2× |
+| | High | 29.9 s | 53,490 | 2,769 | $0.0519 | 1.5× |
+| | Extra high | 34.2 s | 55,183 | 3,358 | $0.0608 | 1.7× |
+| | Maximum | 118.9 s | 67,079 | 15,652 | $0.1952 | 5.6× |
+| **Haiku 5.5** | Low | 15.9 s | 39,482 | 2,378 | $0.0030 | 1.0× |
+| | Medium | 20.7 s | 54,431 | 3,343 | $0.0034 | 1.1× |
+| | High | 25.1 s | 60,638 | 4,084 | $0.0039 | 1.3× |
+| | Extra high | 29.2 s | 61,650 | 4,700 | $0.0042 | 1.4× |
+| | Maximum | 114.2 s | 69,114 | 25,366 | $0.0165 | 5.5× |
+| **gemma4:e4b** | Low | 28.0 s | 19,348 | 744 | free | — |
+| | High | 44.8 s | 27,291 | 2,034 | free | — |
+| **qwen3.5** | Low | 68.8 s | 36,922 | 1,686 | free | — |
+| | High | 597.2 s | 68,238 | 3,937 | free | — |
+
+What the answers were actually like:
+
+- **Low to Extra high is a narrow band.** Sonnet answered all three
+  questions correctly at every one of them. Low and Medium are hard to
+  tell apart; **High** is where the restore answer gains the
+  troubleshooting `table` card as well as the checklist, and Extra high
+  adds the sources card to the LDAP answer. Half again the cost between
+  the two ends, and about a third more time.
+- **Maximum is not worth it on a wiki this size.** Five and a half times
+  the cost and four times the time on both cloud models, for the same
+  cards and the same facts — Sonnet wrote 15,652 output tokens where
+  Extra high wrote 3,358. Haiku at Maximum was actively *worse*: it lost
+  the checklist on the restore question and answered with sources alone.
+  It is listed because a question that has to be right is worth paying
+  for; nothing here showed it earning the money.
+- **Haiku is about twelve times cheaper than Sonnet** and roughly as
+  quick, but it over-draws: at Low, Medium and High it answered the
+  restore question with a checklist and *four* `known_issue` cards. Extra
+  high is the level where it settles down to checklist + table + sources.
+- **Medium is the default** because it is the cheapest level that never
+  gave a wrong or thin answer, and because the difference up to Extra
+  high is a fuller answer rather than a more correct one.
+
+### Is Opus worth it here
+
+`claude-opus-5-5` is supported but deliberately **not** in the default
+`MODELS` line. It was measured the same way, all five levels, three
+questions each:
+
+| Effort | 3 answers | Input + cache read | Output | Cost | vs Low |
+| --- | --- | --- | --- | --- | --- |
+| Low | 37.3 s | 49,567 | 2,922 | $0.1250 | 1.0× |
+| Medium | 49.8 s | 60,225 | 3,604 | $0.1233 | 1.0× |
+| High | 45.9 s | 53,474 | 3,675 | $0.1240 | 1.0× |
+| Extra high | 52.9 s | 60,252 | 4,555 | $0.1481 | 1.2× |
+| Maximum | 296.7 s | 76,507 | 31,221 | $0.7123 | 5.7× |
+
+Priced at Opus 5.5's $4 / $20 per MTok, cache write $5, cache read $0.20.
+
+It is the best of the three at the cards: from **Medium** upwards it drew
+checklist + table + sources on the restore question, which Sonnet only
+manages at High. But that is the whole of the difference, and it is not
+worth what it costs:
+
+| | 3 answers | Cost | Cards on the restore question |
+| --- | --- | --- | --- |
+| Sonnet 5.5, Medium | 23.6 s | $0.0417 | checklist + sources |
+| **Sonnet 5.5, High** | **29.9 s** | **$0.0519** | **checklist + table + sources** |
+| Opus 5.5, Medium | 49.8 s | $0.1233 | checklist + table + sources |
+
+**Sonnet at High gives the same answer as Opus at Medium for 42% of the
+cost and 60% of the time.** On a wiki of a few pages there is nothing for
+the extra capability to do. Opus is worth adding if the wiki grows to the
+point where answers have to hold several long pages together at once —
+measure it again then.
+
+Opus at Maximum repeats the trap the other two show, and worse: 5.7× the
+cost, six times the time, and it **lost the checklist** on the restore
+question and answered with sources alone. Of the three models, every one
+of them is at its worst at Maximum.
+
+To offer it, add it to `MODELS`:
+
+```
+MODELS=anthropic:claude-sonnet-5-5,anthropic:claude-opus-5-5,anthropic:claude-haiku-5-5,ollama:gemma4:e4b
+```
+
+### Local models
+
+Measured on this M1 Max against the three questions from step 3a, with the
+real agent — nine tools and the full system prompt. Both installed models
+have Ollama's `tools` capability; neither is as good as it looks on paper.
+
+| At its better level | restore a backup | error 3201 | LDAP (not in the wiki) |
+| --- | --- | --- | --- |
+| **Sonnet 5.5**, Medium | 9.2 s, checklist + sources | 6.6 s, known_issue + sources | 7.8 s, draft_page |
+| **Haiku 5.5**, Extra high | 10.7 s, checklist + table + sources | 6.0 s, known_issue + sources | 12.5 s, draft_page + sources |
+| **gemma4:e4b**, High | 25.5 s, checklist + table + sources | 3.4 s, **nothing at all** | 15.9 s, draft_page |
+| **qwen3.5**, High | **531.8 s**, the same checklist **five times** | 21.6 s, known_issue + sources | 43.8 s, draft_page, no text |
+
+Both installed models have Ollama's `tools` capability, so both were
+measured; the answers vary a great deal from one run to the next, and so
+does the time, which depends on whether Ollama still has the model loaded:
+
+- **gemma4:e4b** is the one to list. At High it matched Sonnet exactly on
+  the restore question — checklist, troubleshooting table and sources — and
+  offered a draft for the LDAP question. At Low it drew one card across all
+  three questions instead of five, which is why thinking stays on. It
+  returned nothing at all for "what does error 3201 mean" at **both**
+  levels, where the run now says so rather than showing an empty bubble.
+- **gemma4:e4b** gets the *content* right nearly every time, and cites it.
+  What it does not do reliably is draw the cards: in about half the runs it
+  produced the right ones (its best runs matched Sonnet exactly, checklist
+  and troubleshooting table and all), and in the others it missed one,
+  repeated its own paragraph, stopped mid-sentence, came back empty, or
+  printed the card's own markup at the reader (`<known_issue title=…>`, a
+  fenced `{"tool_calls": …}` block). It is listed anyway, clearly marked,
+  because a reader who wants nothing to leave the Mac can pick it and switch
+  back in one click. Take it out of `MODELS` to remove it from the menu.
+- **qwen3.5** is not listed. At High it spent **nine minutes** on the restore
+  question and drew the same checklist card five times; two of its three
+  answers came back with cards but no text. At Low it is quicker but stops
+  using the cards. Either way it is slower than gemma4:e4b for a worse
+  answer.
+- `OLLAMA_THINKING=0` sends `reasoning_effort: 'none'`, which makes both two
+  to five times faster and both worse: qwen3.5 then stops using the cards at
+  all and narrates its own searching ("I'll search the wiki for…"), and
+  gemma4:e4b writes its tool call out as text (`search_wiki[query="…"]`).
+  Left on.
+- It is the models, not the plumbing: through Ollama's own `/api/chat` and
+  through the OpenAI-compatible `/v1`, both parse a two-tool request
+  identically. They come apart under the real prompt.
+- A model that ends its turn having produced only thinking used to leave an
+  empty bubble. The run now says so instead, and suggests another model.
 
 ## How the agent answers
 

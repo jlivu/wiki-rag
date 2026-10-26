@@ -11,28 +11,24 @@ import { SourceRegistry } from '../agent/sources.js'
 import { runWikiAgent } from '../agent/wiki-agent.js'
 import type { Config } from '../config.js'
 import type { Indexer } from '../indexer/indexer.js'
-import { createProvider, ProviderError, type ChatProvider } from '../providers/index.js'
+import { ProviderError, ProviderPool } from '../providers/index.js'
 import { WikiClient, readWikiToken } from '../wiki/client.js'
-import { AGENT_PATH, readForwardedPage } from '../../shared/index.js'
+import {
+  AGENT_PATH, readForwardedEffort, readForwardedModel, readForwardedPage
+} from '../../shared/index.js'
 
 export function agentRoutes (config: Config, indexer: Indexer): FastifyPluginAsync {
-  // Built once: the provider holds a client, not per-run state. A bad
-  // configuration (a missing key, say) is kept and reported per run rather
+  // One provider per allowlisted model, built on first use and kept: a
+  // provider holds an HTTP client and no per-run state. A model that
+  // cannot be built — Anthropic with no key — fails for that run rather
   // than stopping the service from starting.
-  let provider: ChatProvider | null = null
-  let providerError: Error | null = null
-  if (config.llm.provider !== 'mock') {
-    try {
-      provider = createProvider(config)
-    } catch (err) {
-      providerError = err instanceof Error ? err : new Error(String(err))
-    }
-  }
+  const providers = new ProviderPool(config.llm)
 
   return async (app) => {
-    if (providerError) {
-      app.log.error({ provider: config.llm.provider, reason: providerError.message }, 'the model provider is not usable')
-    }
+    app.log.info({
+      models: providers.choices.map(choice => choice.id),
+      default: providers.defaultChoice.id
+    }, 'models a reader may pick')
 
     app.post(AGENT_PATH, async (request, reply) => {
       // Fastify stops managing the response; the events are written by hand.
@@ -76,19 +72,52 @@ export function agentRoutes (config: Config, indexer: Indexer): FastifyPluginAsy
 
         const page = readForwardedPage(input.data.forwardedProps)
 
+        // The browser sends an id, never a model name. Anything not on
+        // the server's own list is refused outright: a run must never be
+        // able to name a model the administrator did not allow.
+        const wanted = readForwardedModel(input.data.forwardedProps)
+        const choice = wanted === undefined ? providers.defaultChoice : providers.find(wanted)
+        if (!choice) {
+          request.log.warn({ wanted }, 'rejected a run: that model is not on the list')
+          fail('UNKNOWN_MODEL', 'That model is not available here. Pick another one under the message box.')
+          return
+        }
+
+        // Same rule for the effort: anything this model does not offer —
+        // including a level that is not a level at all — is refused
+        // rather than quietly rounded to one it does.
+        const asked = readForwardedEffort(input.data.forwardedProps)
+        const unsupported = asked.kind === 'level' &&
+          !choice.efforts.some(level => level.id === asked.level)
+        if (asked.kind === 'unknown' || unsupported) {
+          request.log.warn(
+            { model: choice.id, asked: asked.kind },
+            'rejected a run: that effort is not supported'
+          )
+          fail('UNKNOWN_EFFORT', `${choice.label} does not offer that effort level.`)
+          return
+        }
+        const effort = asked.kind === 'level'
+          ? asked.level
+          : choice.defaultEffort ?? config.llm.effort
+
         if (config.llm.provider === 'mock') {
           await runMockAgent({ input: input.data, page, emit, isAborted: () => aborted })
           request.log.info({ provider: 'mock', ms: Date.now() - startedAt }, 'agent run finished')
           return
         }
 
+        let provider
+        try {
+          provider = providers.get(choice)
+        } catch (err) {
+          const reason = err instanceof ProviderError ? err.message : 'The assistant is not configured correctly.'
+          request.log.error({ err, model: choice.id }, 'that model could not be started')
+          fail('NOT_CONFIGURED', `${choice.label} cannot answer: ${reason}`)
+          return
+        }
         if (!provider) {
-          fail(
-            'NOT_CONFIGURED',
-            config.llm.provider === 'anthropic' && config.llm.apiKey.length === 0
-              ? 'The assistant has no API key yet. Add ANTHROPIC_API_KEY to ai/.env and restart it.'
-              : 'The assistant is not configured correctly. Check the service log.'
-          )
+          fail('NOT_CONFIGURED', 'The assistant is not configured correctly. Check the service log.')
           return
         }
 
@@ -116,13 +145,18 @@ export function agentRoutes (config: Config, indexer: Indexer): FastifyPluginAsy
           isAborted: () => aborted,
           signal: abort.signal,
           maxToolSteps: config.llm.maxToolSteps,
-          maxOutputTokens: config.llm.maxOutputTokens
+          maxOutputTokens: config.llm.maxOutputTokens,
+          effort
         })
 
         // Cost and tool use, with no page content and no credentials.
         request.log.info({
           provider: provider.id,
           model: provider.model,
+          effort,
+          // Whether the reader chose these or took what they were given.
+          modelChosen: wanted !== undefined,
+          effortChosen: asked.kind === 'level',
           signedIn: wiki.isAuthenticated,
           ms: Date.now() - startedAt,
           steps: stats.steps,

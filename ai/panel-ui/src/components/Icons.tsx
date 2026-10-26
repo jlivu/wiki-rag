@@ -157,3 +157,14 @@ export function CheckIcon () {
     </svg>
   )
 }
+
+/** Points into a submenu, or back out of one when turned around. */
+export function CaretIcon ({ back = false }: { back?: boolean }) {
+  return (
+    <svg {...base} width={11} height={11}>
+      {back
+        ? <polyline points="10,3 5.5,8 10,13" />
+        : <polyline points="6,3 10.5,8 6,13" />}
+    </svg>
+  )
+}

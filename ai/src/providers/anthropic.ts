@@ -49,7 +49,10 @@ export function createAnthropicProvider (llm: LlmConfig): ChatProvider {
           description: tool.description,
           input_schema: tool.inputSchema as Anthropic.Tool['input_schema']
         })),
-        output_config: { effort: llm.effort },
+        // Anthropic's own dial, GA and inside output_config rather than
+        // at the top level. Every current Claude model takes all five
+        // levels; the reader's choice arrives with the request.
+        output_config: { effort: request.effort },
         // Caches the conversation so far as well: a run asks the model
         // several times with a growing prefix, and so does a follow-up
         // question in the same thread.

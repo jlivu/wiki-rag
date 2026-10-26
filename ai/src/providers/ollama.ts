@@ -34,6 +34,15 @@ export function createOllamaProvider (llm: LlmConfig): ChatProvider {
         stream = await client.chat.completions.create({
           model: llm.model,
           max_tokens: request.maxOutputTokens,
+          // Ollama has no effort scale, only thinking on or off, so the
+          // reader's two levels map onto that. Thinking on is each
+          // model's own default and the one they answer best at; off is
+          // much faster and much worse — measurements under "Local
+          // models" in ai/README.md. OLLAMA_THINKING=0 forces it off
+          // whatever the reader picked.
+          ...(llm.ollamaThinking && request.effort !== 'low'
+            ? {}
+            : { reasoning_effort: 'none' as const }),
           messages: toOpenAiMessages(request.system, request.messages),
           tools: request.tools.map(tool => ({
             type: 'function' as const,

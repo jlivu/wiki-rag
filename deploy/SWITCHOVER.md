@@ -240,6 +240,13 @@ docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
 docker compose --env-file .env.prod -f docker-compose.prod.yml ps
 ```
 
+The wiki container mounts `deploy/config.prod.yml` over the image's own
+`config.yml` — the same file plus `offline: true`. If that file is
+missing, Docker makes a directory in its place, Wiki.js cannot read its
+configuration and the container exits with *"Unable to read configuration
+file!"*; `docker logs wiki-prod` says so plainly. Step 9.13 confirms it
+took effect.
+
 Wait for `wiki-prod` to be healthy (up to a minute on the first start),
 then:
 
@@ -379,6 +386,97 @@ All at http://localhost:8088/a. Each is one-off.
    ```bash
    docker logs --since 1m wiki-prod-ai 2>&1 | grep -E 'page-event|indexed a page'
    ```
+
+10. **Utilities > Telemetry** → confirm it is still **off**.
+
+    You turned it off in the installed wiki on 2026-10-26, and the
+    switch-over reuses that same database volume, so the setting should
+    come across — but it is one row in a table this plan has been
+    restoring and repointing, so it is worth one look. Telemetry sends
+    Wiki.js's servers one message per process start: version, platform,
+    OS name and release, CPU architecture, database type and version,
+    Node version, CPU cores, RAM in MB, and a random client id. No page
+    content and no user data. (`sendError` and `sendEvent` are stubs in
+    2.5.315 and send nothing at all.)
+
+    Check it without the browser:
+    ```bash
+    docker exec wiki-prod-db psql -U wikijs -d wiki -tAc \
+      "SELECT value->>'isEnabled' FROM settings WHERE key='telemetry';"
+    ```
+    `false` is what you want. If it says `true`, turn it off in
+    **Administration > Utilities > Telemetry** rather than editing the
+    row, so the running process picks it up.
+
+    See "What leaves this Mac" in `deploy/README.md` for everything else
+    the stack talks to.
+
+11. **General > Logo** → confirm it is **not** the Wiki.js butterfly.
+
+    You set the coat of arms in the installed wiki, and the switch-over
+    reuses that database, so it should come across. The default logo is
+    fetched from `static.requarks.io` by **every reader's browser on
+    every page view**, which is the stack's most frequent call off this
+    Mac — worth confirming rather than assuming.
+
+    Note it is `logoUrl` that matters, not `hasLogo`: `hasLogo` is
+    written once at install and never read again in 2.5.315, so it stays
+    `false` whatever you do in the admin area. The check is:
+    ```bash
+    docker exec wiki-prod-db psql -U wikijs -d wiki -tAc \
+      "SELECT value->>'v' FROM settings WHERE key='logoUrl';"
+    ```
+    Anything but a `static.requarks.io` URL is right; a path like
+    `/_assets/logo/…` is served by this wiki.
+
+    Then prove it from the page the readers get:
+    ```bash
+    curl -s http://localhost:8088/en/home | grep -c 'static.requarks.io'   # want 0
+    ```
+    And once, in a browser: open http://localhost:8088, dev tools >
+    Network, reload, and sort by domain. Every row should be
+    `localhost:8088`. (Verified this way on a copy of the database:
+    with the logo set locally, a browser loading the home page, a
+    content page and `/login` made no request off the machine.)
+
+12. **Rendering > markdown > PlantUML** → confirm it is **off**.
+
+    You disabled it in the installed wiki. It is the one renderer that
+    would put page content on the wire: a ` ```plantuml ` block becomes
+    `<img src="https://plantuml.requarks.io/svg/<the diagram source,
+    deflated and base64'd>">`, which the reader's browser fetches and
+    that server logs.
+    ```bash
+    docker exec wiki-prod-db psql -U wikijs -d wiki -tAc \
+      'SELECT "isEnabled" FROM renderers WHERE key = '"'"'markdownPlantuml'"'"';'
+    ```
+    `f` is what you want. **Mermaid** (`htmlMermaid`) stays on and is the
+    one to use for diagrams — it renders in the browser from code in the
+    image and calls nothing.
+
+13. **Offline mode** → confirm it took, which needs no admin page.
+
+    `docker-compose.prod.yml` mounts `deploy/config.prod.yml` over the
+    image's `/wiki/config.yml`. It is that file plus `offline: true`,
+    which makes Wiki.js skip the version check and the locale sync and
+    refuse to send telemetry whatever the admin setting says. Production
+    only — development keeps the image default.
+
+    The jobs announce that they were skipped:
+    ```bash
+    docker logs wiki-prod 2>&1 | grep -i 'offline mode is enabled'
+    ```
+    Two lines, `syncGraphLocales` and `syncGraphUpdates`. If instead you
+    see `Fetching latest updates from Graph endpoint`, the mount did not
+    land — check that `deploy/config.prod.yml` exists and that the
+    compose file was the one used.
+
+    The admin area is unharmed: Administration still shows the version
+    (it reports the installed one as the latest, rather than an error),
+    and **Locale** still lists what is in the database. The one thing
+    lost is downloading a *new* language; English is built in. To add one
+    later, comment out `offline: true`, `up -d wiki`, install it, put the
+    line back.
 
 ## 10. Register the production MCP server in Claude Code
 

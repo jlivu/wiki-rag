@@ -4,6 +4,9 @@
  * Ollama (local).
  */
 import type { ProviderId } from '../config.js'
+import type { EffortLevel } from '../../shared/index.js'
+
+export { formatAnthropicModel } from './format.js'
 
 /** A tool offered to the model. `inputSchema` is a JSON Schema object. */
 export interface ToolSpec {
@@ -47,6 +50,12 @@ export interface ChatRequest {
   messages: ChatMessage[]
   tools: ToolSpec[]
   maxOutputTokens: number
+  /**
+   * How hard to work on this answer. Per request, not per provider: the
+   * reader picks it under the message box and can change it between one
+   * question and the next.
+   */
+  effort: EffortLevel
   signal: AbortSignal
 }
 
@@ -66,16 +75,4 @@ export class ProviderError extends Error {
     this.name = 'ProviderError'
     this.code = code
   }
-}
-
-/** "claude-sonnet-5-5" -> "Claude Sonnet 5.5"; unknown shapes pass through. */
-export function formatAnthropicModel (model: string): string {
-  const parts = model.split('-')
-  if (parts[0] !== 'claude' || parts.length < 2) { return model }
-  const rest = parts.slice(1).filter(part => !/^\d{8}$/.test(part))
-  const name = rest[0]
-  if (!name) { return model }
-  const version = rest.slice(1).join('.')
-  const title = name.charAt(0).toUpperCase() + name.slice(1)
-  return version ? `Claude ${title} ${version}` : `Claude ${title}`
 }

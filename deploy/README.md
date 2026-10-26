@@ -230,6 +230,134 @@ year's `immutable` caching on the hashed files Vite emits.
 Neither image carries a secret. Everything comes from `.env.prod` at
 runtime.
 
+## What leaves this Mac
+
+Production is only reachable from this Mac, and as configured it reaches
+out to **nothing** — the two things that used to, the Wiki.js butterfly
+logo and the version/locale/telemetry calls, are both switched off. This
+section says what each one was, how it is stopped, and what would turn it
+back on.
+
+Everything below was read from the code of 2.5.315 and this fork. It was
+also measured: a copy of the wiki database was run against the production
+image with `graph.requarks.io` and `static.requarks.io` pointed at a
+listener on the same Docker network, and a browser loaded the home page,
+a content page and `/login` with its network tab recorded.
+
+| | Connections seen |
+| --- | --- |
+| Image's own config, default logo | 3 to `graph.requarks.io` within a second of startup, plus one per page view to `static.requarks.io` from the browser |
+| **This stack** (`offline: true`, logo set) | **none, from the server or the browser** |
+
+### Stopped, and how
+
+| Was going to | When | What it would send | What stops it |
+| --- | --- | --- | --- |
+| **`static.requarks.io`** — the Wiki.js butterfly logo | Every page view, in every reader's browser | Whatever a browser sends: IP, user agent, and the wiki's URL as the `Referer` | **The site logo is set** (Admin > General > Logo), so `logoUrl` points at this wiki. Note that `hasLogo` in the `settings` table is a dead field — written once at install, never read in 2.5.315 — so `logoUrl` is the thing to check. |
+| `graph.requarks.io` — update check (`syncGraphUpdates`) | At every start, then daily | The release channel and the Wiki.js version | **`offline: true`** in `deploy/config.prod.yml` |
+| `graph.requarks.io` — locale list (`syncGraphLocales`) | At every start, then daily | A plain query with no variables | **`offline: true`** |
+| `graph.requarks.io` — locale download | Only when an administrator installs a language | Which locale was asked for | **`offline: true`** — and this is the one real cost of it, see below |
+| `graph.requarks.io` — telemetry | Once per process start, if the admin setting is on | Version, platform, OS name and release, CPU architecture, database type and version, Node version, CPU cores, RAM in MB, a random client id. No page content, no user data | **Both**: the setting is off (Admin > Utilities > Telemetry), and `offline: true` refuses it regardless — verified by enabling the setting in a throwaway copy and watching nothing leave. (`sendError`/`sendEvent` are stubs in 2.5.315 and send nothing in any case.) |
+| **`plantuml.requarks.io`** | Any page holding a ` ```plantuml ` block, fetched by the reader's browser | **The diagram's source**, deflate-compressed and base64'd into the URL path — reversible, and it lands in that server's access log | **The renderer is disabled** (Admin > Rendering > markdown > PlantUML). Use **Mermaid** for diagrams: it is enabled, renders in the browser from code in the image, and calls nothing. |
+| `static.requarks.io` — module logos | Admin pages listing modules (Auth, Comments, Analytics, Storage, Search) | The same, from the administrator's browser only | Nothing short of editing the modules' `definition.yml`. Only an administrator triggers it, and only on those pages. |
+
+### About offline mode
+
+`offline: true` is Wiki.js's single switch for the four
+`graph.requarks.io` rows: it marks both daily jobs skipped
+(`server/app/data.yml` flags them `offlineSkip`) and makes
+`server/core/telemetry.js` refuse to enable itself.
+
+It is not in the admin area and not an environment variable — it is a
+line in `config.yml`, and the one baked into the image
+(`dev/build/config.yml`, upstream's) does not have it. So
+`docker-compose.prod.yml` mounts **`deploy/config.prod.yml`** over it:
+the image's file copied verbatim, placeholders and all, with
+`offline: true` appended. Keep the two in step when rebasing.
+
+Confirmed working against a copy of the database: both jobs log
+`Skipping job … because offline mode is enabled. [SKIPPED]`, nothing
+reaches the listener, and **login, search, page rendering and the admin
+area all behave** — Administration reports the installed version as the
+latest rather than erroring, and Locale still lists what is installed.
+
+The one thing it costs is downloading a **new** language. English is
+built in. To add another later: comment the line out, `up -d wiki`,
+install the language, put the line back.
+
+This is production only. Development keeps the image's default, so the
+behaviour upstream expects stays testable.
+
+### Was never on
+
+- **Mail** — no SMTP host is set, so nothing is sent. (The e-mail
+  templates reference `static.requarks.io` images, but those are fetched
+  by the recipient's mail client, not by this machine.)
+- **All sixteen analytics modules** — Google, GTM, Matomo, Plausible,
+  Yandex, Baidu, New Relic, Hotjar and the rest — are disabled.
+- **`markdownKroki`** and **`markdownMathjax`** renderers are disabled.
+  **Mermaid** and **KaTeX** are enabled but render in the browser from
+  code bundled in the image; no request leaves. Mermaid is the diagram
+  renderer to use.
+- **Authentication** is local only. An external provider would add two
+  paths: the sign-in round trip, and readers' browsers loading avatars
+  from the provider's `pictureUrl`.
+- **Storage** is our own *AI Assistant Index* module, which only calls
+  `http://ai:4000` on the Docker network. The git, S3, Azure and Dropbox
+  modules are not enabled.
+- **Ollama** (embeddings, local answers) and **whisper.cpp** (dictation)
+  run on this Mac and listen on `127.0.0.1` only. Containers reach them
+  through `host.docker.internal`, which Docker Desktop forwards to
+  loopback — the traffic never reaches a network interface.
+- The **assistant's own MCP server** is inbound only.
+
+### On, and does send page content
+
+This is the part that is deliberately left on, because it is what the
+assistant is for.
+
+| Goes to | When | What it sends | Turning it off |
+| --- | --- | --- | --- |
+| **`api.anthropic.com`** — answering a question | Every question a reader asks the assistant | The system prompt, the conversation, and whatever the wiki tools returned for that question: page text, document text, image OCR and AI descriptions, titles and paths. Prompt caching is on, so that content is also held by Anthropic for the cache's lifetime | Put only local models in `MODELS` (e.g. `MODELS=ollama:gemma4:e4b`), or `LLM_PROVIDER=ollama`. The reader can also pick a local model per question, under the message box — but the allowlist is what decides whether the cloud is reachable at all. |
+| **`api.anthropic.com`** — describing an image | While indexing an uploaded image, once per distinct picture (cached by content hash) | The picture, resized and re-encoded as JPEG, which strips EXIF, XMP, IPTC and the colour profile — GPS with them. Only the capture date survives | `IMAGE_DESCRIBER=off` in `.env.prod`. OCR and alt text still work; only the generated description goes. |
+
+### Not at runtime
+
+Building the images pulls from Docker Hub, npm and Debian's archives
+(Tesseract and poppler for the AI image). `deploy/build.sh` is the only
+thing that does this, and the running stack does not.
+
+### Checking for yourself
+
+```bash
+# Offline mode took. Want: two "[SKIPPED]" lines, and no "Graph endpoint"
+docker logs wiki-prod 2>&1 | grep -iE 'offline mode is enabled|Graph endpoint'
+
+# The logo is ours, not the butterfly. Want: not a requarks.io URL
+docker exec wiki-prod-db psql -U wikijs -d wiki -tAc \
+  "SELECT value->>'v' FROM settings WHERE key='logoUrl';"
+
+# PlantUML. Want: f
+docker exec wiki-prod-db psql -U wikijs -d wiki -tAc \
+  'SELECT "isEnabled" FROM renderers WHERE key = '"'"'markdownPlantuml'"'"';'
+
+# Telemetry, from the database rather than the browser. Want: false
+docker exec wiki-prod-db psql -U wikijs -d wiki -tAc \
+  "SELECT value->>'isEnabled' FROM settings WHERE key='telemetry';"
+
+# Analytics modules that are switched on. Want: no rows
+docker exec wiki-prod-db psql -U wikijs -d wiki -tAc \
+  'SELECT key FROM analytics WHERE "isEnabled";'
+
+# Pages that would call out to the PlantUML server. Want: 0
+docker exec wiki-prod-db psql -U wikijs -d wiki -tAc \
+  "SELECT count(*) FROM pages WHERE content LIKE '%plantuml%';"
+```
+
+For the browser side, open the dev tools' network tab on a page and sort
+by domain. Every row should be `localhost:8088`. A `static.requarks.io`
+row means the site logo has gone back to the Wiki.js default.
+
 ## What runs outside Docker
 
 Ollama (embeddings, and a local answering model if you want one) and

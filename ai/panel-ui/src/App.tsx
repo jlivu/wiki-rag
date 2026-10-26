@@ -1,11 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AgentSubscriber, HttpAgent } from '@ag-ui/client'
 
-import { HEALTH_PATH, parsePanelComponent, type HealthResponse, type PageContext } from '@shared'
+import {
+  HEALTH_PATH, modelChipLabel, parsePanelComponent,
+  type EffortLevel, type HealthResponse, type ModelAvailability, type PageContext
+} from '@shared'
 
 import { Composer } from './components/Composer'
 import { MessageFeed } from './components/MessageFeed'
 import { createAgent } from './lib/agent'
+import { ModelPicker } from './components/ModelPicker'
+import {
+  fetchModels, rememberEffort, rememberModel, rememberedEffort, rememberedModel,
+  resolveChoice, resolveEffort
+} from './lib/models'
 import type { PanelParams } from './lib/params'
 import { postStatus } from './lib/parent'
 import { forgetCreatedPages } from './lib/created-pages'
@@ -29,6 +37,11 @@ export default function App ({ params }: { params: PanelParams }) {
   const [signedIn, setSignedIn] = useState(false)
   const [announcement, setAnnouncement] = useState('')
   const [focusToken, setFocusToken] = useState(0)
+  // Which model answers. The list is the service's; the choice is the
+  // reader's and is kept in this browser.
+  const [models, setModels] = useState<ModelAvailability[]>([])
+  const [modelId, setModelId] = useState<string | null>(null)
+  const [effort, setEffort] = useState<EffortLevel | null>(null)
 
   // One agent per thread. It carries the conversation that is sent with
   // every run, and starting a new chat replaces it.
@@ -60,6 +73,8 @@ export default function App ({ params }: { params: PanelParams }) {
       })
       .then(body => {
         if (cancelled) { return }
+        // Overwritten by the chosen model's own label once the list
+        // arrives; until then the chip names the server's default.
         setStatusLabel(body.provider?.label)
         // No speech service, no microphone button.
         setSpeech(body.speech)
@@ -73,6 +88,49 @@ export default function App ({ params }: { params: PanelParams }) {
   useEffect(() => {
     if (online !== null) { postStatus(online, statusLabel) }
   }, [online, statusLabel])
+
+  // The models on offer, and the one this browser last picked.
+  useEffect(() => {
+    let cancelled = false
+    void fetchModels()
+      .then(({ models: list, defaultId }) => {
+        if (cancelled || list.length === 0) { return }
+        const chosen = resolveChoice(list, defaultId, rememberedModel())
+        setModels(list)
+        setModelId(chosen)
+        setEffort(resolveEffort(list.find(model => model.id === chosen), rememberedEffort(chosen)))
+      })
+      .catch(() => { /* No picker, and the server's default answers. */ })
+    return () => { cancelled = true }
+  }, [])
+
+  const selected = models.find(model => model.id === modelId)
+
+  // The chip in the panel header names whichever model will answer the
+  // next question, and whether it runs here or in the cloud.
+  useEffect(() => {
+    if (selected) { setStatusLabel(modelChipLabel(selected)) }
+  }, [selected])
+
+  const chooseModel = useCallback((id: string) => {
+    const wanted = models.find(model => model.id === id)
+    if (wanted?.available !== true) { return }
+    setModelId(id)
+    rememberModel(id)
+    // Each model keeps its own level, so switching back and forth does
+    // not quietly reset what the reader chose.
+    const level = resolveEffort(wanted, rememberedEffort(id))
+    setEffort(level)
+    setAnnouncement(`${wanted.label} will answer the next question.`)
+  }, [models])
+
+  const chooseEffort = useCallback((level: EffortLevel) => {
+    if (modelId === null) { return }
+    setEffort(level)
+    rememberEffort(modelId, level)
+    const named = models.find(model => model.id === modelId)?.efforts.find(entry => entry.id === level)
+    setAnnouncement(`Effort set to ${named?.label ?? level} for the next question.`)
+  }, [modelId, models])
 
   const startNewChat = useCallback(() => {
     generationRef.current += 1
@@ -96,7 +154,9 @@ export default function App ({ params }: { params: PanelParams }) {
     const onMessage = (event: MessageEvent) => {
       if (event.source !== window.parent || event.origin !== window.location.origin) { return }
       const data: unknown = event.data
-      if (typeof data === 'object' && data !== null && (data as { type?: unknown }).type === 'wiki-ai:new-chat') {
+      if (typeof data !== 'object' || data === null) { return }
+      const message = data as { type?: unknown, id?: unknown }
+      if (message.type === 'wiki-ai:new-chat') {
         startNewChat()
       }
     }
@@ -193,7 +253,15 @@ export default function App ({ params }: { params: PanelParams }) {
     agent.addMessage({ id: question.id, role: 'user', content: text })
 
     try {
-      await agent.runAgent({ forwardedProps: { page: params.page } }, subscriber)
+      // The model travels with the run, so a change takes effect from
+      // the next question and the one in flight finishes as it started.
+      await agent.runAgent({
+        forwardedProps: {
+          page: params.page,
+          ...(modelId ? { model: modelId } : {}),
+          ...(effort ? { effort } : {})
+        }
+      }, subscriber)
       if (stale()) { return }
       if (!failed) {
         setOnline(true)
@@ -221,7 +289,7 @@ export default function App ({ params }: { params: PanelParams }) {
         setAnnouncement(`${failed ? 'Assistant error' : 'Assistant'}: ${spoken()}`)
       }
     }
-  }, [busy, params.page])
+  }, [busy, params.page, modelId, effort])
 
   return (
     <div className="panel">
@@ -231,6 +299,19 @@ export default function App ({ params }: { params: PanelParams }) {
         focusToken={focusToken}
         onSend={text => { void send(text) }}
         {...(speech ? { speech } : {})}
+        {...(modelId !== null && models.length > 0
+          ? {
+              picker: (
+                <ModelPicker
+                  models={models}
+                  selectedId={modelId}
+                  effort={effort}
+                  onSelectModel={chooseModel}
+                  onSelectEffort={chooseEffort}
+                />
+              )
+            }
+          : {})}
       />
       {/* Finished replies are announced; the tokens on the way are not. */}
       <p className="sr-only" role="status" aria-live="polite">{announcement}</p>

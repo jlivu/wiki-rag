@@ -5,13 +5,15 @@ import { useDictation } from '../lib/dictation'
 
 const MAX_HEIGHT = 140
 
-export function Composer ({ busy, focusToken, onSend, speech }: {
+export function Composer ({ busy, focusToken, onSend, speech, picker }: {
   busy: boolean
   /** Changes when something outside wants the cursor back in the box. */
   focusToken: number
   onSend: (text: string) => void
   /** Dictation, when the service has a speech model to offer. */
   speech?: { enabled: boolean, maxSeconds: number }
+  /** The model and effort picker, beside the note. None until it loads. */
+  picker?: React.ReactNode
 }) {
   const [value, setValue] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -131,9 +133,12 @@ export function Composer ({ busy, focusToken, onSend, speech }: {
           )
         : null}
 
-      <p className="composer-note">
-        Answers are written by AI and can be wrong. Check them against the sources listed with each reply.
-      </p>
+      <div className="composer-foot">
+        <p className="composer-note">
+          Answers are written by AI and can be wrong. Check them against the sources listed with each reply.
+        </p>
+        {picker}
+      </div>
 
       {/* Said once, politely, so a screen reader is not read the level. */}
       <p className="sr-only" role="status" aria-live="polite">{announcement}</p>

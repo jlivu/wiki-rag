@@ -1010,6 +1010,214 @@ pre,
   color: var(--text-3);
 }
 
+/* ── which model answers, and how hard it works ────────────────── */
+
+/* The note and the picker share the last row under the message box. */
+.composer-foot {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 0 13px 9px;
+}
+
+.composer-foot .composer-note {
+  flex: 1 1 auto;
+  padding: 0;
+  min-width: 0;
+}
+
+.picker {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.picker-button {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 190px;
+  padding: 3px 6px 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.12s, color 0.12s;
+}
+
+.picker-button:hover,
+.picker-button[aria-expanded='true'] {
+  background-color: var(--surface-2);
+  color: var(--text);
+}
+
+.picker-button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.picker-button-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.picker-button-caret {
+  display: flex;
+  flex-shrink: 0;
+  /* The caret points into the menu, which opens upwards. */
+  transform: rotate(-90deg);
+  opacity: 0.8;
+}
+
+.picker-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 20;
+  width: 300px;
+  max-width: calc(100vw - 26px);
+  max-height: 62vh;
+  overflow-y: auto;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background-color: var(--surface);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.26);
+  text-align: left;
+}
+
+.picker-section + .picker-section {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.picker-item,
+.picker-back {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.picker-item:hover:not(.is-unavailable),
+.picker-back:hover {
+  background-color: var(--surface-2);
+}
+
+.picker-item:focus-visible,
+.picker-back:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.picker-item.is-unavailable {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.picker-back {
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 2px;
+  color: var(--text-2);
+  font-weight: 600;
+}
+
+.picker-tick {
+  flex: 0 0 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 17px;
+  color: var(--primary);
+}
+
+.picker-caret {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  color: var(--text-3);
+}
+
+.picker-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.picker-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.picker-note {
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+.picker-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 20px;
+  background-color: var(--primary-soft);
+  color: var(--primary);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* "Effort            Medium  ›" */
+.picker-row {
+  align-items: center;
+  gap: 8px;
+}
+
+.picker-row-label {
+  flex: 1 1 auto;
+  font-weight: 600;
+}
+
+.picker-row-value {
+  flex-shrink: 0;
+  color: var(--text-2);
+}
+
+.picker-group {
+  margin: 0;
+  padding: 5px 9px 3px;
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.picker-intro {
+  margin: 0;
+  padding: 2px 9px 7px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
 .composer-send {
   flex-shrink: 0;
   height: 37px;
