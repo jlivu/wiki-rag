@@ -145,6 +145,57 @@ const HYBRID_SQL = `
   ORDER BY f.score DESC, o.kind, o.owner_id, c.ordinal
 `
 
+/**
+ * The full-text half on its own, for when there is no vector to search
+ * with.
+ *
+ * Embeddings come from Ollama, and Ollama is a separate service that can
+ * be down or still starting. The GIN index is in this database and needs
+ * nothing else, so a question can still be answered from the words on
+ * the page — worse than the hybrid search, and much better than telling
+ * the reader the assistant is broken. Scores are shaped like the fused
+ * ones (1 / (k + rank)) so everything downstream sorts the same way.
+ */
+const TEXT_SQL = `
+  WITH ${OWNER_SQL},
+  tsq AS (
+    SELECT websearch_to_tsquery('english', $2::text) AS query
+  ),
+  fts AS (
+    SELECT chunk_id, rank FROM (
+      SELECT c.id AS chunk_id, row_number() OVER (ORDER BY ts_rank_cd(c.fts, tsq.query) DESC) AS rank
+      FROM index_chunks c
+      JOIN owner o ON o.chunk_id = c.id
+      CROSS JOIN tsq
+      WHERE c.fts @@ tsq.query
+        AND ($1::text IS NULL OR o.kind <> 'page' OR o.locale = $1::text)
+    ) matched
+    WHERE rank <= $3
+  )
+  SELECT
+    c.id, c.ordinal, c.heading_path, c.anchor, c.location, c.origin, c.text,
+    c.starts_at, c.ends_at,
+    (1.0 / ($4::numeric + f.rank))::float8 AS score,
+    NULL::bigint AS vector_rank, f.rank AS text_rank,
+    o.kind, o.owner_id, o.title, o.path, o.locale, o.updated_at,
+    o.file_name, o.doc_type, o.mime, o.file_size, o.duration
+  FROM fts f
+  JOIN index_chunks c ON c.id = f.chunk_id
+  JOIN owner o ON o.chunk_id = c.id
+  ORDER BY f.rank
+`
+
+/** Keyword matches only: what the index can answer with Ollama down. */
+export async function searchChunksByText (
+  db: Pool,
+  query: string,
+  locale: string | null,
+  perList: number
+): Promise<ChunkHit[]> {
+  const { rows } = await db.query<SearchRow>(TEXT_SQL, [locale, query, perList, RRF_K])
+  return rows.map(toHit)
+}
+
 export async function searchChunks (
   db: Pool,
   queryEmbedding: string,
@@ -152,16 +203,40 @@ export async function searchChunks (
   locale: string | null,
   perList: number
 ): Promise<ChunkHit[]> {
-  const { rows } = await db.query<{
-    id: number, kind: 'page' | 'document' | 'video', owner_id: number, ordinal: number,
-    heading_path: string, anchor: string, location: string, origin: string, text: string,
-    starts_at: string | null, ends_at: string | null,
-    score: number, vector_rank: number | null, text_rank: number | null,
-    title: string, path: string, locale: string, updated_at: Date,
-    file_name: string, doc_type: string, mime: string, file_size: string, duration: string
-  }>(HYBRID_SQL, [queryEmbedding, locale, query, perList, RRF_K])
+  const { rows } = await db.query<SearchRow>(
+    HYBRID_SQL, [queryEmbedding, locale, query, perList, RRF_K]
+  )
+  return rows.map(toHit)
+}
 
-  return rows.map(row => ({
+interface SearchRow {
+  id: number
+  kind: 'page' | 'document' | 'video'
+  owner_id: number
+  ordinal: number
+  heading_path: string
+  anchor: string
+  location: string
+  origin: string
+  text: string
+  starts_at: string | null
+  ends_at: string | null
+  score: number
+  vector_rank: number | null
+  text_rank: number | null
+  title: string
+  path: string
+  locale: string
+  updated_at: Date
+  file_name: string
+  doc_type: string
+  mime: string
+  file_size: string
+  duration: string
+}
+
+function toHit (row: SearchRow): ChunkHit {
+  return {
     chunkId: row.id,
     kind: row.kind,
     ownerId: row.owner_id,
@@ -171,9 +246,9 @@ export async function searchChunks (
     location: row.location,
     origin: row.origin,
     text: row.text,
-    score: row.score,
-    vectorRank: row.vector_rank,
-    textRank: row.text_rank,
+    score: Number(row.score),
+    vectorRank: row.vector_rank === null ? null : Number(row.vector_rank),
+    textRank: row.text_rank === null ? null : Number(row.text_rank),
     title: row.title,
     path: row.path,
     locale: row.locale,
@@ -185,7 +260,7 @@ export async function searchChunks (
     startsAt: row.starts_at === null ? null : Number(row.starts_at),
     endsAt: row.ends_at === null ? null : Number(row.ends_at),
     durationSeconds: Number(row.duration ?? 0)
-  }))
+  }
 }
 
 /** Every chunk of one document, in order: what get_document reads. */

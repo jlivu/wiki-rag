@@ -24,6 +24,9 @@ services:
       - "5432"
     volumes:
       - ai-db-data:/var/lib/postgresql/data
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U wiki_ai -d wiki_ai"]
       interval: 5s
@@ -56,6 +59,13 @@ services:
     volumes:
       - ../../ai:/app
       - /app/node_modules
+      # Videos live on the Mac, not in Wiki.js's database. Read-only: the
+      # service indexes and serves them, and never writes there.
+      # Development and production have separate folders.
+      - ${MEDIA_HOST_DIR:-${HOME}/Media/wiki-dev}:/media:ro
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
   # The chat app, in development: Vite with hot reload. In production the
   # Fastify service serves panel-ui/dist instead and this is not needed.
@@ -70,6 +80,9 @@ services:
     volumes:
       - ../../ai:/app
       - /app/panel-ui/node_modules
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
   proxy:
     container_name: wiki-proxy
@@ -82,6 +95,22 @@ services:
       - "3080:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # ── the base file's own services ──────────────────────────────────
+  #
+  # Added here rather than in docker-compose.yml, which is upstream
+  # Wiki.js and otherwise untouched: compose merges a service across
+  # files, so this caps the dev server's log without a fork diff. The
+  # base file already sets `driver: none` on db and adminer, which
+  # writes no log at all. Running the base file on its own — without
+  # this overlay — leaves the dev server's log uncapped.
+  wiki:
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
 
 volumes:
   ai-db-data:

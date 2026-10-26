@@ -258,6 +258,21 @@ const MIGRATIONS: Migration[] = [
       );
       CREATE INDEX IF NOT EXISTS index_video_frames_hash ON index_video_frames (content_hash);
     `
+  },
+  {
+    // Which models produced what is in the index.
+    //
+    // The name is not the version: `ollama pull nomic-embed-text` can
+    // bring down different weights under the same name, and a vector
+    // from one set means nothing to another. Three fingerprints are
+    // recorded, and a change to each has a different consequence — see
+    // indexer/model-drift.ts.
+    name: '014-model-fingerprint',
+    sql: `
+      ALTER TABLE index_meta ADD COLUMN IF NOT EXISTS embed_digest  text NOT NULL DEFAULT '';
+      ALTER TABLE index_meta ADD COLUMN IF NOT EXISTS vision_model  text NOT NULL DEFAULT '';
+      ALTER TABLE index_meta ADD COLUMN IF NOT EXISTS speech_model  text NOT NULL DEFAULT '';
+    `
   }
 ]
 
@@ -292,14 +307,31 @@ export async function migrate (db: Pool): Promise<string[]> {
 export interface IndexMeta {
   embedModel: string
   embedDims: number
+  /** Ollama's manifest digest for that model, or '' if never recorded. */
+  embedDigest: string
+  /** What described images and video frames: "anthropic:claude-haiku-5-5". */
+  visionModel: string
+  /** What transcribed videos: "whispercpp:ggml-small.en". */
+  speechModel: string
 }
 
 export async function readMeta (db: Pool): Promise<IndexMeta | null> {
-  const { rows } = await db.query<{ embed_model: string, embed_dims: number }>(
-    'SELECT embed_model, embed_dims FROM index_meta WHERE id'
+  const { rows } = await db.query<{
+    embed_model: string, embed_dims: number, embed_digest: string,
+    vision_model: string, speech_model: string
+  }>(
+    'SELECT embed_model, embed_dims, embed_digest, vision_model, speech_model FROM index_meta WHERE id'
   )
   const row = rows[0]
-  return row ? { embedModel: row.embed_model, embedDims: row.embed_dims } : null
+  return row
+    ? {
+        embedModel: row.embed_model,
+        embedDims: row.embed_dims,
+        embedDigest: row.embed_digest,
+        visionModel: row.vision_model,
+        speechModel: row.speech_model
+      }
+    : null
 }
 
 /**
@@ -314,8 +346,14 @@ export async function readMeta (db: Pool): Promise<IndexMeta | null> {
 export async function ensureEmbeddingColumn (
   db: Pool,
   model: string,
-  dims: number
-): Promise<{ reset: boolean }> {
+  dims: number,
+  /**
+   * Ollama's digest for the model. An empty string means it could not
+   * be asked, which is never treated as a change: a service that is
+   * merely down must not be the reason the index is thrown away.
+   */
+  digest = ''
+): Promise<{ reset: boolean, reason?: string }> {
   if (!Number.isInteger(dims) || dims < 1 || dims > HNSW_MAX_DIMS) {
     throw new Error(
       `"${model}" returns ${dims}-dimension vectors, and pgvector can only index up to ${HNSW_MAX_DIMS}. ` +
@@ -324,12 +362,30 @@ export async function ensureEmbeddingColumn (
   }
 
   const meta = await readMeta(db)
-  const matches = meta !== null && meta.embedModel === model && meta.embedDims === dims
+  // A digest we could not read, and one that was never recorded, both
+  // mean "no information" rather than "different".
+  const sameWeights = digest.length === 0 || meta === null ||
+    meta.embedDigest.length === 0 || meta.embedDigest === digest
+  const matches = meta !== null && meta.embedModel === model && meta.embedDims === dims && sameWeights
+
   if (matches && await hasEmbeddingColumn(db)) {
+    // The digest may be newly known for a model recorded before 014.
+    if (digest.length > 0 && meta.embedDigest !== digest) {
+      await db.query('UPDATE index_meta SET embed_digest = $1 WHERE id', [digest])
+    }
     return { reset: false }
   }
 
   const reset = meta !== null
+  const reason = meta === null
+    ? 'the index is new'
+    : meta.embedModel !== model
+      ? `the embedding model changed from ${meta.embedModel} to ${model}`
+      : meta.embedDims !== dims
+        ? `${model} now returns ${dims}-dimension vectors, not ${meta.embedDims}`
+        : !sameWeights
+          ? `${model} was re-pulled: a different build of the same name`
+          : 'the embedding column was missing'
 
   // One transaction: a failure part way through would otherwise leave the
   // index emptied and the column gone.
@@ -349,13 +405,14 @@ export async function ensureEmbeddingColumn (
       USING hnsw (embedding vector_cosine_ops)
     `)
     await client.query(`
-      INSERT INTO index_meta (id, embed_model, embed_dims, updated_at)
-      VALUES (true, $1, $2, now())
-      ON CONFLICT (id) DO UPDATE SET embed_model = $1, embed_dims = $2, updated_at = now()
-    `, [model, dims])
+      INSERT INTO index_meta (id, embed_model, embed_dims, embed_digest, updated_at)
+      VALUES (true, $1, $2, $3, now())
+      ON CONFLICT (id) DO UPDATE SET
+        embed_model = $1, embed_dims = $2, embed_digest = $3, updated_at = now()
+    `, [model, dims, digest])
   })
 
-  return { reset }
+  return { reset, reason }
 }
 
 async function hasEmbeddingColumn (db: Pool): Promise<boolean> {

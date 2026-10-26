@@ -54,6 +54,31 @@ export class Embedder {
     return embeddings
   }
 
+  /**
+   * The model's manifest digest, as Ollama reports it in /api/tags.
+   *
+   * The name is not the version: `ollama pull nomic-embed-text` can
+   * bring down different weights under the same name, and vectors from
+   * one set mean nothing to another. The digest is what actually
+   * changes, so it is what the index records.
+   *
+   * Returns '' when Ollama cannot be asked. That is deliberately *not*
+   * treated as a change by the caller: a service that is merely down
+   * must never be the reason the whole index is thrown away.
+   */
+  async digest (): Promise<string> {
+    try {
+      const response = await fetch(`${this.#url}/api/tags`, {
+        signal: AbortSignal.timeout(Math.min(this.#timeoutMs, 10_000))
+      })
+      if (!response.ok) { return '' }
+      const body = await response.json() as { models?: Array<{ name?: string, digest?: string }> }
+      return digestOf(body.models ?? [], this.model)
+    } catch {
+      return ''
+    }
+  }
+
   /** How wide this model's vectors are. */
   async dimensions (): Promise<number> {
     const [vector] = await this.embed(['dimension probe'])
@@ -62,6 +87,23 @@ export class Embedder {
     }
     return vector.length
   }
+}
+
+/**
+ * Find a model in Ollama's list.
+ *
+ * Ollama reports `nomic-embed-text:latest` for what the configuration
+ * and every API call call `nomic-embed-text`, so an exact match is not
+ * enough; an explicit tag still has to match exactly, because
+ * `qwen3.5:8b` and `qwen3.5:32b` are different models.
+ */
+export function digestOf (
+  models: Array<{ name?: string, digest?: string }>,
+  wanted: string
+): string {
+  const exact = models.find(model => model.name === wanted)
+  const tagged = models.find(model => model.name === `${wanted}:latest`)
+  return (exact ?? tagged)?.digest ?? ''
 }
 
 /** pgvector's text form, which the driver sends as a vector literal. */

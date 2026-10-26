@@ -141,6 +141,25 @@ export async function runDocumentJob (
       }, sourceHash, options.images)
 
       if (read.chunks.length === 0) {
+        // A picture whose only content was a generated description, read
+        // again on a day the describer answered with nothing or the daily
+        // allowance had run out, would otherwise be recorded as having
+        // nothing in it — and nothing would ever queue it again, so one
+        // bad minute would quietly take it out of the index for good.
+        // What is already there is kept and the next pass tries again.
+        const transient = read.described === 'empty' || read.described === 'over-limit'
+        if (transient && indexed?.status === 'indexed') {
+          const reason = read.described === 'over-limit'
+            ? 'the day\'s description allowance is used up; keeping what is indexed'
+            : 'the description came back empty; keeping what is indexed'
+          await record(
+            db,
+            { ...base, docType: 'image', sourceHash: indexed.sourceHash, status: 'indexed', reason: '' },
+            embedder.model,
+            { keepChunks: true }
+          )
+          return { action: 'skipped', reason, described: read.described }
+        }
         const reason = 'no text, no alt text and no description'
         await record(db, { ...base, docType: 'image', sourceHash, status: 'needs_ocr', reason }, embedder.model)
         return { action: 'skipped', reason }

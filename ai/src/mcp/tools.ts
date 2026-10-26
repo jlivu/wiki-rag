@@ -14,6 +14,7 @@ import { readVideoByPath, videoChunks } from '../index-db/store.js'
 import type { Retriever } from '../indexer/retrieval.js'
 import { forgetStaleDocument } from '../indexer/stale.js'
 import { WikiClient, WikiError } from '../wiki/client.js'
+import { DEGRADED_NOTE } from '../wiki/tools.js'
 import { createPage } from '../wiki/pages.js'
 import { AI_DRAFT_TAG, mediaUrl } from '../../shared/index.js'
 import { htmlToMarkdown, trimForContext } from '../wiki/markdown.js'
@@ -135,6 +136,7 @@ export async function searchWiki (
             score: item.score
           }
     )),
+    ...(found.mode === 'keyword' ? { note: DEGRADED_NOTE } : {}),
     ...(found.results.length === 0 ? { note: 'Nothing matched. Try different wording.' } : {})
   })
 }

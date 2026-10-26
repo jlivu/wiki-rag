@@ -19,6 +19,14 @@ export const SEARCH_WIKI = 'search_wiki'
 export const GET_PAGE = 'get_page'
 export const GET_DOCUMENT = 'get_document'
 
+/**
+ * What the model is told when the index could only be searched by
+ * keyword. It says what to do about it, because a model that is simply
+ * told something is degraded tends to apologise rather than answer.
+ */
+export const DEGRADED_NOTE =
+  'The embedding service is not answering, so this was a keyword search only: results that use different words from the question are missing. Answer from what is here, and tell the reader the assistant is searching by keyword at the moment and may have missed something.'
+
 const DEFAULT_RESULT_LIMIT = 8
 const MAX_RESULT_LIMIT = 20
 const MAX_PAGE_CHARS = 12000
@@ -267,18 +275,24 @@ async function search (ctx: ToolContext, input: Record<string, unknown>): Promis
           result: JSON.stringify({
             query,
             results,
+            ...(found.mode === 'keyword' ? { note: DEGRADED_NOTE } : {}),
             ...(results.length === 0
-              ? { note: 'Nothing matched. Try different wording, or tell the reader the wiki does not cover this.' }
+              ? {
+                  note: found.mode === 'keyword'
+                    ? `Nothing matched. ${DEGRADED_NOTE}`
+                    : 'Nothing matched. Try different wording, or tell the reader the wiki does not cover this.'
+                }
               : {})
           }),
           summary: {
             query,
             locale,
-            source: 'index',
+            source: found.mode === 'keyword' ? 'index (keyword only)' : 'index',
             results: found.results.length,
             checked: found.checked,
             filtered: found.filtered,
-            ...(found.stale > 0 ? { stale: found.stale } : {})
+            ...(found.stale > 0 ? { stale: found.stale } : {}),
+            ...(found.degradedReason ? { degraded: found.degradedReason } : {})
           }
         }
       }

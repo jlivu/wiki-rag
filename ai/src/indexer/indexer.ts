@@ -15,7 +15,7 @@ import {
 } from '../index-db/migrate.js'
 import { getPool } from '../index-db/pool.js'
 import {
-  claim, complete, enqueue, enqueueIfAbsent, fail, queueDepth,
+  claim, complete, enqueue, enqueueIfAbsent, fail, queueDepth, retryLater,
   type IndexEvent, type QueuedJob
 } from '../index-db/queue.js'
 import {
@@ -34,8 +34,9 @@ import { createImageDescriber, type ImageDescriber } from '../images/describe.js
 import { AssetDirectory } from './asset-directory.js'
 import { runDocumentJob } from './document-job.js'
 import { MediaWatcher, type MediaSweep } from './media-watch.js'
+import { fingerprintsOf, reconcileModels } from './model-drift.js'
 import { runVideoJob, type VideoProgress } from './video-job.js'
-import { Embedder } from './embeddings.js'
+import { Embedder, EmbeddingError } from './embeddings.js'
 import { forgetPage } from './forget.js'
 import { runJob, type JobOutcome } from './job.js'
 import type { LinkScanOptions } from './links.js'
@@ -43,6 +44,18 @@ import { Retriever } from './retrieval.js'
 
 const IDLE_POLL_MS = 1000
 const RECONCILE_START_DELAY_MS = 5000
+/**
+ * How long to leave the embedding service alone after it has failed,
+ * doubling up to the ceiling. Without this the worker knocks on a dead
+ * Ollama once a second and writes a log line every time — 86,000 lines
+ * a day saying the same thing.
+ */
+const EMBED_RETRY_MIN_MS = 2000
+const EMBED_RETRY_MAX_MS = 60_000
+/** A job put back because embeddings are down comes round again in this. */
+const EMBED_JOB_RETRY_SECONDS = 60
+/** However long an outage lasts, say so in the log this often. */
+const OUTAGE_LOG_EVERY_MS = 5 * 60_000
 
 export interface IndexerStatus {
   enabled: boolean
@@ -83,6 +96,18 @@ export interface IndexReport {
   reason?: string
   queued: number
   embedding: { model: string | null, dims: number | null }
+  /**
+   * Which models produced what is in the index, as recorded when it was
+   * built — not what the settings say now, so a change shows up as a
+   * difference rather than being invisible.
+   */
+  models: {
+    embedding: string
+    vision: string
+    speech: string
+    /** What changed since the last start, and what was done about it. */
+    changed: string[]
+  }
   index: Awaited<ReturnType<typeof indexCounts>> & { lastIndexedAt: string | null }
   wiki: { pages: number, files: number } | null
   /** Everything out of step, and empty when nothing is. */
@@ -138,6 +163,14 @@ export class Indexer {
   #startupTimer: NodeJS.Timeout | null = null
   #draining = false
   #lastReconcile: ReconcileReport | null = null
+  /** Backoff state for an embedding service that is not answering. */
+  #embedRetryAt = 0
+  #embedBackoffMs = EMBED_RETRY_MIN_MS
+  #embedOutageSince = 0
+  #embedLoggedAt = 0
+  /** The vision and speech check runs once per start. */
+  #modelsChecked = false
+  #modelDrift: string[] = []
 
   constructor (config: Config, log: FastifyBaseLogger) {
     this.#config = config
@@ -299,19 +332,94 @@ export class Indexer {
    * index is emptied and reconciliation fills it again.
    */
   async #prepareEmbeddings (): Promise<void> {
+    // An outage is answered with backoff, not with a knock a second.
+    if (Date.now() < this.#embedRetryAt) { return }
+
     try {
       const dims = await this.#embedder.dimensions()
-      const { reset } = await ensureEmbeddingColumn(this.#db, this.#embedder.model, dims)
+      // The digest, not just the name: the same name can be different
+      // weights. Unreadable comes back as '' and counts as no change.
+      const digest = await this.#embedder.digest()
+      const { reset, reason } = await ensureEmbeddingColumn(this.#db, this.#embedder.model, dims, digest)
       this.#ready = true
       this.#reason = undefined
+      if (this.#embedOutageSince > 0) {
+        this.#log.info(
+          { downForSeconds: Math.round((Date.now() - this.#embedOutageSince) / 1000) },
+          'the embedding service is answering again; indexing has resumed'
+        )
+      }
+      this.#embedRetryAt = 0
+      this.#embedBackoffMs = EMBED_RETRY_MIN_MS
+      this.#embedOutageSince = 0
+      this.#embedLoggedAt = 0
       this.#log.info(
-        { model: this.#embedder.model, dims, reset },
+        { model: this.#embedder.model, dims, digest: digest.slice(0, 16) || 'unknown', reset, ...(reset ? { reason } : {}) },
         reset ? 'the embedding model changed; re-indexing everything' : 'embeddings ready'
       )
+      // The other two models, now the index has a row to compare with.
+      await this.#checkModels()
     } catch (err) {
-      this.#ready = false
-      this.#reason = err instanceof Error ? err.message : 'embeddings are unavailable'
-      this.#log.warn({ err }, 'embeddings are not available yet; will retry')
+      this.#noEmbeddings(err)
+    }
+  }
+
+  /**
+   * Has the vision or speech model changed under us?
+   *
+   * Only once per start: both are configuration, and the service is
+   * restarted when configuration changes.
+   */
+  async #checkModels (): Promise<void> {
+    if (this.#modelsChecked) { return }
+    this.#modelsChecked = true
+    try {
+      const drift = await reconcileModels(this.#db, this.#config, await this.#ollamaTags(), this.#log)
+      this.#modelDrift = drift.changes
+    } catch (err) {
+      this.#log.warn({ err }, 'the recorded models could not be compared with the configured ones')
+    }
+  }
+
+  /** Ollama's model list, for the digests. Null when it cannot be asked. */
+  async #ollamaTags (): Promise<Array<{ name?: string, digest?: string }> | null> {
+    try {
+      const response = await fetch(`${this.#config.llm.ollamaUrl}/api/tags`, {
+        signal: AbortSignal.timeout(10_000)
+      })
+      if (!response.ok) { return null }
+      const body = await response.json() as { models?: Array<{ name?: string, digest?: string }> }
+      return body.models ?? null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * The embedding service is not answering.
+   *
+   * Nothing is lost by waiting: queued jobs stay queued, the reason is
+   * in the index status, and search answers by keyword in the meantime
+   * (see retrieval.ts). The log says so once, and then at most every few
+   * minutes, so an outage is visible without drowning everything else.
+   */
+  #noEmbeddings (err: unknown): void {
+    const reason = err instanceof Error ? err.message : 'embeddings are unavailable'
+    const first = this.#embedOutageSince === 0
+    if (first) { this.#embedOutageSince = Date.now() }
+
+    this.#ready = false
+    this.#reason = `${reason} — indexing is paused and search is answering by keyword only`
+    this.#embedRetryAt = Date.now() + this.#embedBackoffMs
+    this.#embedBackoffMs = Math.min(EMBED_RETRY_MAX_MS, this.#embedBackoffMs * 2)
+
+    if (first || Date.now() - this.#embedLoggedAt > OUTAGE_LOG_EVERY_MS) {
+      this.#embedLoggedAt = Date.now()
+      this.#log.warn({
+        err,
+        downForSeconds: Math.round((Date.now() - this.#embedOutageSince) / 1000),
+        retryInSeconds: Math.round(this.#embedBackoffMs / 1000)
+      }, 'the embedding service is not answering; indexing is paused and queued work is kept')
     }
   }
 
@@ -586,6 +694,7 @@ export class Indexer {
         ...base,
         queued: 0,
         embedding: { model: null, dims: null },
+        models: { embedding: '', vision: '', speech: '', changed: [] },
         index: { ...emptyCounts(), lastIndexedAt: null },
         wiki: null,
         drift: { ...noDrift(), note: ['the indexer is off: WIKI_API_KEY is not set'] },
@@ -651,11 +760,20 @@ export class Indexer {
     if (this.#lastReconcile && !this.#lastReconcile.ok) { note.push('the last reconciliation failed') }
     if (!this.#lastReconcile) { note.push('no reconciliation has run yet') }
     if (!this.#ready) { note.push(this.#reason ?? 'the indexer is not ready') }
+    for (const change of this.#modelDrift) { note.push(`${change}; what it produced is being read again`) }
 
     return {
       ...base,
       queued,
       embedding: { model: meta?.embedModel ?? stats.embedModel, dims: meta?.embedDims ?? stats.embedDims },
+      models: {
+        embedding: meta
+          ? `${meta.embedModel}@${meta.embedDigest.slice(0, 16) || 'unversioned'}`
+          : '',
+        vision: meta?.visionModel ?? '',
+        speech: meta?.speechModel ?? '',
+        changed: this.#modelDrift
+      },
       index: { ...counts, lastIndexedAt: stats.lastIndexedAt },
       wiki,
       drift: {
@@ -788,6 +906,14 @@ export class Indexer {
       }
       this.#log.info({ ...what, event: job.event, ms: Date.now() - startedAt, ...outcome }, message)
     } catch (err) {
+      // Nothing to do with this job: put it back without counting it
+      // against the five attempts, or an outage would quietly drop
+      // everything that was queued during it.
+      if (err instanceof EmbeddingError) {
+        this.#noEmbeddings(err)
+        await retryLater(this.#db, job, err.message, EMBED_JOB_RETRY_SECONDS)
+        return
+      }
       const reason = err instanceof Error ? err.message : String(err)
       const { dropped } = await fail(this.#db, job, reason)
       this.#log.warn({ ...what, event: job.event, attempts: job.attempts + 1, dropped, err }, 'indexing failed')

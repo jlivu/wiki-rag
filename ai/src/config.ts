@@ -67,6 +67,13 @@ export interface SpeechConfig {
   /** whisper.cpp's server. It runs natively on the Mac, for the GPU. */
   url: string
   language: string
+  /**
+   * Which whisper model the server was started with, declared rather
+   * than detected: whisper.cpp's server reports nothing about the model
+   * it loaded. Changing this is how an administrator says "the videos
+   * were transcribed by something else now" — see indexer/model-drift.ts.
+   */
+  model: string
   /** Longest recording accepted, in seconds. */
   maxSeconds: number
   /** Recordings per reader per minute. */
@@ -382,6 +389,7 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
       // arrangement as Ollama; containers reach it through the host.
       url: trimSlash(env.STT_URL ?? 'http://host.docker.internal:8178'),
       language: nonEmpty(env.STT_LANGUAGE) ?? 'en',
+      model: nonEmpty(env.STT_MODEL) ?? '',
       maxSeconds: readInt(env.STT_MAX_SECONDS, 120),
       rateLimitPerMinute: readInt(env.STT_RATE_LIMIT_PER_MINUTE, 20)
     }
@@ -513,6 +521,7 @@ export function describeConfig (config: Config): Record<string, unknown> {
     speechProvider: config.speech.provider,
     speechUrl: config.speech.provider === 'off' ? null : config.speech.url,
     speechLanguage: config.speech.language,
+    speechModel: config.speech.model.length > 0 ? config.speech.model : null,
     speechMaxSeconds: config.speech.maxSeconds,
     mediaDir: config.media.directory,
     mediaScanSeconds: config.media.scanSeconds,

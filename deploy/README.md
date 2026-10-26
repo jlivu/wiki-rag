@@ -178,6 +178,57 @@ at 02:10 takes the backup when it next wakes.
 To stop the daily backup:
 `launchctl unload ~/Library/LaunchAgents/vu.gov.doft.wiki-backup.plist`
 
+### The monthly restore drill
+
+A backup nobody has restored is a hope, not a backup. Once a month:
+
+```bash
+deploy/drill.sh
+```
+
+It takes the newest dump in `~/Backups/wiki-rag`, restores it into a
+throwaway Postgres, and checks what came back:
+
+```
+drill: wiki-2026-10-26-0210.dump — 232K, 8h old
+drill: restoring into a throwaway postgres:16-alpine
+drill: restored in 3s
+drill:   pages 41, assets 87, users 6, settings 23
+drill:   newest page in the dump: 2026-10-25T21:58:43.769Z
+drill:   live wiki now: pages 41, users 6
+drill:   videos: 12 in /Users/joelivu/Media/wiki, 12 in the mirror
+drill: PASSED — wiki-2026-10-26-0210.dump restores, and what came back looks like the wiki
+```
+
+It fails, loudly and with exit code 1, when:
+
+- there is no dump at all, or `pg_restore` cannot read the one there is
+- the dump has no pages, no users or no settings
+- the dump has more than 10% fewer pages than the live wiki
+  (`DRILL_TOLERANCE_PERCENT` to change that) — a dump can restore
+  perfectly and still be missing half the wiki
+- the media mirror is short of a video that is in the media folder,
+  since videos are not in the dump at all
+
+It warns, without failing, when the newest backup is over 48 hours old —
+which usually means the launch agent is not loaded.
+
+Nothing that is running is touched: production is not stopped, not
+written to, and only asked how many rows it has. If production is not
+running the drill still checks the dump, and says it had nothing to
+compare against.
+
+It takes the throwaway's Postgres image from the live database
+container, because `pg_restore` cannot read an archive written by a
+newer `pg_dump`. After a Postgres upgrade it follows the upgrade by
+itself; set `DRILL_POSTGRES_IMAGE` to override.
+
+It deliberately does not call `restore.sh`: a drill that depends on the
+script it is drilling tells you nothing on the day that script is what
+broke. What it cannot rehearse is `restore.sh --into-production`, which
+writes over the live database — that path is only ever exercised for
+real, which is why the drill proves the dump instead.
+
 ### Checking a backup can be restored
 
 Worth doing after any change to the stack, and occasionally anyway. It
@@ -223,6 +274,29 @@ The stock image is 2.5.317 and this fork's base is 2.5.315, which is a
 *downgrade* in version number but not in schema: both have exactly the
 same 16 migrations, verified against the installed wiki's own database.
 Nothing has to be migrated in either direction.
+
+## Container logs
+
+Every service in `docker-compose.prod.yml` writes through the `json-file`
+driver with **`max-size: 10m`, `max-file: 3`** — at most 30 MB each, 150
+MB for the stack, rotated by Docker with no cron job and nothing to
+remember. Without an explicit limit `json-file` grows without bound, and
+the service that would fill it first is the one that logs a line per
+indexed page.
+
+```bash
+# what each container is actually set to
+docker compose --env-file .env.prod -f docker-compose.prod.yml ps -q |
+  xargs docker inspect --format '{{.Name}} {{.HostConfig.LogConfig.Type}} {{.HostConfig.LogConfig.Config}}'
+```
+
+A change to the logging block only takes effect when the container is
+recreated (`docker compose up -d`), not on a restart.
+
+Development is capped the same way, in
+`dev/containers/docker-compose.ai.yml` — including an override for the
+`wiki` service, which is defined in the upstream compose file this fork
+leaves alone.
 
 ## What is in the images
 
@@ -377,6 +451,25 @@ docker exec wiki-prod-db psql -U wikijs -d wiki -tAc \
 For the browser side, open the dev tools' network tab on a page and sort
 by domain. Every row should be `localhost:8088`. A `static.requarks.io`
 row means the site logo has gone back to the Wiki.js default.
+
+## When Ollama or whisper.cpp is not running
+
+Both run natively on this Mac, outside the stack, so both can be away
+while the wiki is up. Neither takes the assistant down with it:
+
+| | What still works | What does not |
+| --- | --- | --- |
+| **Ollama away** | Questions are answered: the index is searched by keyword, and the reply says the assistant is searching by keyword and may have missed something. Pages, files and videos are all still found. | No new or changed content is indexed. The queue keeps it and runs it when Ollama is back — nothing is lost, and no job is dropped for it. |
+| **whisper.cpp away** | Everything except the two below. | The microphone button disappears from the panel (the health check probes for it), and a video with no subtitles beside it is left for later rather than indexed without its words. |
+
+`deploy/drill.sh` and `deploy/backup.sh` do not need either.
+
+The index status is where to look:
+
+```bash
+docker exec wiki-prod-ai node -e "fetch('http://127.0.0.1:4000/internal/status?compare=0')
+  .then(r => r.json()).then(j => console.log(j.ready, j.reason ?? 'ok', j.queued, 'queued'))"
+```
 
 ## What runs outside Docker
 

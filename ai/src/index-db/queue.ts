@@ -123,6 +123,30 @@ export async function fail (db: Pool, job: QueuedJob, reason: string): Promise<{
   return { dropped: false }
 }
 
+/**
+ * Put a job back without counting it as an attempt.
+ *
+ * For a failure that is nothing to do with the job: the embedding
+ * service being down is the case this exists for. Counting those would
+ * drop the work after five tries during an outage that is going to end,
+ * and the page would then only come back on the next reconciliation.
+ */
+export async function retryLater (
+  db: Pool,
+  job: QueuedJob,
+  reason: string,
+  seconds: number
+): Promise<void> {
+  await db.query(`
+    UPDATE index_queue SET
+      last_error = $3,
+      locked_at  = NULL,
+      run_after  = now() + make_interval(secs => $4),
+      updated_at = now()
+    WHERE kind = $1 AND entity_id = $2
+  `, [job.kind, job.entityId, reason.slice(0, 500), seconds])
+}
+
 export async function queueDepth (db: Pool): Promise<number> {
   const { rows } = await db.query<{ count: string }>('SELECT count(*)::text AS count FROM index_queue')
   return Number(rows[0]?.count ?? 0)

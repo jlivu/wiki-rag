@@ -1290,6 +1290,74 @@ wiki has to be served over HTTPS or the microphone button will be there and
 `getUserMedia` will refuse. The panel says so plainly when it happens
 ("The browser blocked the microphone"), but the fix is a certificate.
 
+## When a model changes under the index
+
+A model's *name* is not its version. `ollama pull nomic-embed-text` can
+bring down different weights under the same name; a vision model
+reworded overnight writes different descriptions; a different whisper
+model hears different words. Nothing in the wiki changed, so nothing
+would ever read it again — and the index quietly stops agreeing with
+what the same question would produce today.
+
+So the index records which models built it, in `index_meta`, and acts on
+a change at startup:
+
+| | How it is known | What a change does |
+| --- | --- | --- |
+| Embeddings | Ollama's manifest digest, from `/api/tags` | Every vector is meaningless, so the index is emptied and rebuilt |
+| Vision | `IMAGE_DESCRIBER:IMAGE_DESCRIBER_MODEL`, with the digest for a local model | Cached descriptions are dropped; images, and videos with described frames, are read again |
+| Speech | `STT_MODEL`, declared | Videos that were transcribed are read again; ones that took their words from subtitles are left alone |
+
+What is detectable differs. Ollama publishes a digest per model, so a
+re-pull is caught by itself. Anthropic publishes no version beyond the
+model name. whisper.cpp's server answers `/health` and nothing else —
+not the model, not a hash — so `STT_MODEL` is *declared*: setting it to
+match the launch agent, and changing it when you change the agent, is
+how an administrator says "read the videos again".
+
+**A fingerprint that cannot be read is never treated as a change.** An
+Ollama that is down reports no digest, and no digest means "no
+information", not "different" — otherwise an outage would cost a full
+re-index. The same goes for the first run after this was added: the
+recorded value is empty, which is a first sighting rather than a change.
+
+The index status shows all three, so it is possible to see what built
+the index rather than what the settings say now:
+
+```
+curl -s http://127.0.0.1:4000/internal/status?compare=0 | jq .models
+{ "embedding": "nomic-embed-text@0a109f422b47e3a3",
+  "vision": "anthropic:claude-haiku-5-5",
+  "speech": "whispercpp:ggml-small.en",
+  "changed": [] }
+```
+
+## When Ollama is not there
+
+Ollama is a separate service on this Mac, and it can be restarting, or
+pulling a model, or simply not running. Nothing breaks:
+
+- **Search answers by keyword.** The full-text half of the index is a
+  GIN index in the same database as everything else and needs no model
+  at all, so the question is still answered — from the words on the page
+  rather than from their meaning. The result carries a note telling the
+  model to say so, and the run's log line reads
+  `source: "index (keyword only)"`. It is a worse answer, not an error.
+- **Indexing waits.** The worker stops claiming jobs, so the queue keeps
+  everything that was waiting. A job that was already running when
+  Ollama went away is put back *without* counting an attempt — five
+  attempts during an outage would otherwise drop the work — and the
+  retry backs off from two seconds to a minute, with one log line at the
+  start and then at most one every five minutes.
+- **The status says so**, with the reason in `drift.note` and `inStep`
+  false: *"Ollama is unreachable at http://host.docker.internal:11434 —
+  indexing is paused and search is answering by keyword only"*.
+
+When Ollama answers again the backoff clears, the log says how long it
+was down, and the queued work runs. Measured on a job that was mid-flight
+when the service went away: attempts stayed at 0, the error was recorded,
+and the page was indexed 10 seconds after Ollama came back.
+
 ## MCP: the wiki as a tool for agents
 
 `POST /ai/mcp` speaks MCP over Streamable HTTP, built on the official

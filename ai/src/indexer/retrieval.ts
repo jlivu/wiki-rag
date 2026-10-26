@@ -18,12 +18,12 @@
 import type { FastifyBaseLogger } from 'fastify'
 import type { Pool } from 'pg'
 
-import { chunkCount, searchChunks, type ChunkHit } from '../index-db/search.js'
+import { chunkCount, searchChunks, searchChunksByText, type ChunkHit } from '../index-db/search.js'
 import { linkingPages, linkingPagesForVideo, type LinkingPage } from '../index-db/store.js'
 import type { PermissionCache, ResourceKind } from '../wiki/permission-cache.js'
 import { WikiClient, WikiError } from '../wiki/client.js'
 
-import { toVectorLiteral, type Embedder } from './embeddings.js'
+import { EmbeddingError, toVectorLiteral, type Embedder } from './embeddings.js'
 import { forgetStaleDocument, forgetStalePage } from './stale.js'
 
 /** Candidates taken from each of the two searches before fusion. */
@@ -95,6 +95,15 @@ export interface RetrievalResult {
   /** How many the wiki no longer has. They are queued for removal. */
   stale: number
   checked: number
+  /**
+   * 'hybrid' is both halves. 'keyword' means the embedding service was
+   * not there and only the full-text half ran, which the caller has to
+   * pass on: the answer may be missing pages that say the same thing in
+   * different words.
+   */
+  mode: 'hybrid' | 'keyword'
+  /** Why it was degraded, for the log and for the note to the model. */
+  degradedReason?: string
 }
 
 export class Retriever {
@@ -122,10 +131,26 @@ export class Retriever {
     reader: WikiClient,
     readerToken: string | null
   ): Promise<RetrievalResult> {
-    const [vector] = await this.#embedder.embed([query])
-    if (!vector) { throw new Error('the query could not be embedded') }
+    // Both halves when the embedding service is there, and the full-text
+    // half alone when it is not: the GIN index lives in this database and
+    // needs nothing else, so a question is still answered — from the
+    // words on the page rather than from their meaning.
+    let hits: ChunkHit[]
+    let mode: RetrievalResult['mode'] = 'hybrid'
+    let degradedReason: string | undefined
 
-    const hits = await searchChunks(this.#db, toVectorLiteral(vector), query, locale, PER_LIST)
+    try {
+      const [vector] = await this.#embedder.embed([query])
+      if (!vector) { throw new EmbeddingError('the query came back with no embedding') }
+      hits = await searchChunks(this.#db, toVectorLiteral(vector), query, locale, PER_LIST)
+    } catch (err) {
+      if (!(err instanceof EmbeddingError)) { throw err }
+      mode = 'keyword'
+      degradedReason = err.message
+      this.#log.warn({ err, query }, 'searching by keyword only: the embedding service is not answering')
+      hits = await searchChunksByText(this.#db, query, locale, PER_LIST)
+    }
+
     const candidates = group(hits)
 
     // More candidates than will be returned, so enough survive the filter.
@@ -156,7 +181,14 @@ export class Retriever {
       )
     }
 
-    return { results, filtered, stale, checked }
+    return {
+      results,
+      filtered,
+      stale,
+      checked,
+      mode,
+      ...(degradedReason ? { degradedReason } : {})
+    }
   }
 
   /** Whether this reader may open one candidate, page or file. */

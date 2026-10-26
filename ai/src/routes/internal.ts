@@ -129,6 +129,9 @@ function summarise (report: Awaited<ReturnType<Indexer['report']>>): string {
     ? `last reconciled ${report.lastReconcile.at} (${report.lastReconcile.trigger}` +
       `${report.lastReconcile.ok ? '' : ', which failed'})`
     : 'no reconciliation has run yet'
+  const models = `built by ${report.models.embedding || 'an unrecorded embedding model'}` +
+    (report.models.vision && report.models.vision !== 'off' ? `, ${report.models.vision}` : '') +
+    (report.models.speech && report.models.speech !== 'off' ? `, ${report.models.speech}` : '')
   const drift = report.drift.note.length > 0 ? `out of step: ${report.drift.note.join('; ')}` : 'in step'
-  return `${index}; ${wiki}; ${media}; ${last}; ${drift}`
+  return `${index}; ${wiki}; ${media}; ${models}; ${last}; ${drift}`
 }
