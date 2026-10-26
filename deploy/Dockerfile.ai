@@ -49,12 +49,15 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 # Tesseract reads the text in images and in scanned PDF pages; poppler
-# renders a PDF page for it and counts the pages. See ai/README.md.
+# renders a PDF page for it and counts the pages. ffmpeg and ffprobe read
+# the videos in the media folder — audio for whisper.cpp, frames to OCR,
+# any embedded subtitle track. See ai/README.md.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       tesseract-ocr \
       tesseract-ocr-eng \
       poppler-utils \
+      ffmpeg \
       curl \
  && rm -rf /var/lib/apt/lists/*
 

@@ -15,8 +15,11 @@ import type { FastifyPluginAsync, FastifyRequest } from 'fastify'
 
 import type { Config } from '../config.js'
 import { RateLimiter } from '../mcp/rate-limit.js'
+import { withoutFiller } from '../media/filler.js'
 import { readWikiToken } from '../wiki/client.js'
 import { SPEECH_SAMPLE_RATE, TRANSCRIBE_PATH } from '../../shared/index.js'
+
+export { withoutFiller }
 
 const WAV_CONTENT_TYPES = ['audio/wav', 'audio/wave', 'audio/x-wav']
 /** 16-bit mono at 16 kHz is 32 kB a second; the header and some slack on top. */
@@ -212,33 +215,13 @@ async function transcribe (
   if (typeof body.error === 'string' && body.error.length > 0) {
     throw new Error('the speech service refused the recording')
   }
-  return withoutFiller(typeof body.text === 'string' ? body.text.trim() : '')
-}
-
-/**
- * Whisper writes something even when it hears nothing.
- *
- * Given silence or a half-second of room noise it produces one of a small
- * set of stock phrases — "you", "Thank you.", "[BLANK_AUDIO]" — learnt
- * from the end of its training clips. Inserting that into someone's
- * message would be worse than inserting nothing, so a transcript that is
- * *only* filler is treated as nothing heard.
- */
-const FILLER = new Set([
-  'you', 'thank you', 'thanks for watching', 'thank you for watching',
-  'bye', 'okay', 'ok', 'so', 'yeah', 'uh', 'um', '[blank_audio]', '(silence)'
-])
-
-export function withoutFiller (text: string): string {
-  const stripped = text.replace(/\[[^\]]*\]|\([^)]*\)/g, ' ')
-  const words = stripped
-    .split(/[.!?\n]+/)
-    .map(part => part.trim().toLowerCase().replace(/[.,!?]+$/, ''))
-    .filter(part => part.length > 0)
-
-  if (words.length === 0) { return '' }
-  // Repetition of one stock phrase is the signature of silence.
-  return words.every(part => FILLER.has(part)) ? '' : text
+  // whisper.cpp puts each segment on its own line, so a recording of two
+  // sentences comes back as two lines — and with timestamps enabled it
+  // finds more segments, so the same words arrive differently shaped. A
+  // dictated message is one paragraph either way. The filler check runs
+  // first, because it recognises silence by the lines it came back as.
+  const spoken = withoutFiller(typeof body.text === 'string' ? body.text.trim() : '')
+  return spoken.replace(/\s*\n\s*/g, ' ').trim()
 }
 
 /**

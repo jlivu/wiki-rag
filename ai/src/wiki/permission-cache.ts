@@ -26,8 +26,13 @@ interface Entry {
   expires: number
 }
 
-/** A page and a file can share a path; the kind keeps them apart. */
-export type ResourceKind = 'page' | 'document'
+/**
+ * A page and a file can share a path; the kind keeps them apart. A video
+ * is not permission-checked per file — the folder is open to anyone with
+ * a wiki login and to nobody else — so every video shares one entry,
+ * under the empty path.
+ */
+export type ResourceKind = 'page' | 'document' | 'video'
 
 export class PermissionCache {
   readonly #entries = new Map<string, Entry>()

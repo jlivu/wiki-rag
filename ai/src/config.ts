@@ -84,6 +84,40 @@ export interface ImageConfig {
   describeDailyLimit: number
 }
 
+/**
+ * Videos: where they live, how they are read, and what that may cost.
+ *
+ * Everything here is local except a frame description, which is off by
+ * default — a recording is hundreds of frames, and that is a cloud bill
+ * rather than a free one.
+ */
+export interface MediaConfig {
+  /** The media folder inside the container. Unmounted means videos are off. */
+  directory: string
+  /** How often the folder is scanned, as well as watched for changes. */
+  scanSeconds: number
+  /** A file must stop changing for this long before it is read. */
+  settleSeconds: number
+  /** Longer than this is recorded as skipped rather than read. */
+  maxMinutes: number
+  /** Roughly how long one chunk of a video covers. */
+  chunkSeconds: number
+  /** The audio is transcribed a window at a time; this is the target length. */
+  speechWindowSeconds: number
+  /** Read the text on screen with Tesseract. */
+  ocr: boolean
+  /** A frame at least this often, as well as at every scene change. */
+  frameSeconds: number
+  /** 0–1: how much has to change before a frame counts as a new scene. */
+  sceneThreshold: number
+  /** Frames read from one video, at most. */
+  maxFrames: number
+  /** Ask a vision model what a frame shows. Off by default. */
+  describe: boolean
+  /** Frames of one video described, at most. */
+  describeFrameCap: number
+}
+
 /** The MCP server for outside agents. */
 export interface McpConfig {
   /** Tool calls per key per minute. */
@@ -106,6 +140,7 @@ export interface Config {
   index: IndexConfig
   images: ImageConfig
   speech: SpeechConfig
+  media: MediaConfig
 }
 
 const DEFAULT_MODELS: Record<ProviderId, string> = {
@@ -325,6 +360,22 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
         .filter(folder => folder.length > 0),
       describeDailyLimit: readInt(env.IMAGE_DESCRIBE_DAILY_LIMIT, 200)
     },
+    media: {
+      // The container path. docker-compose mounts the Mac's folder here,
+      // read-only; see MEDIA_HOST_DIR in the compose files.
+      directory: nonEmpty(env.MEDIA_DIR) ?? '/media',
+      scanSeconds: readInt(env.MEDIA_SCAN_SECONDS, 30),
+      settleSeconds: readInt(env.MEDIA_SETTLE_SECONDS, 20),
+      maxMinutes: readInt(env.VIDEO_MAX_MINUTES, 240),
+      chunkSeconds: readInt(env.VIDEO_CHUNK_SECONDS, 90),
+      speechWindowSeconds: readInt(env.VIDEO_SPEECH_WINDOW_SECONDS, 30),
+      ocr: readBool(env.VIDEO_OCR, true),
+      frameSeconds: readInt(env.VIDEO_FRAME_SECONDS, 30),
+      sceneThreshold: readRatio(env.VIDEO_SCENE_THRESHOLD, 0.3),
+      maxFrames: readInt(env.VIDEO_MAX_FRAMES, 400),
+      describe: readBool(env.VIDEO_DESCRIBE, false),
+      describeFrameCap: readInt(env.VIDEO_DESCRIBE_FRAME_CAP, 6)
+    },
     speech: {
       provider: readSpeechProvider(env.STT_PROVIDER),
       // Whisper runs natively on the Mac so it can use the GPU, the same
@@ -463,6 +514,12 @@ export function describeConfig (config: Config): Record<string, unknown> {
     speechUrl: config.speech.provider === 'off' ? null : config.speech.url,
     speechLanguage: config.speech.language,
     speechMaxSeconds: config.speech.maxSeconds,
+    mediaDir: config.media.directory,
+    mediaScanSeconds: config.media.scanSeconds,
+    videoChunkSeconds: config.media.chunkSeconds,
+    videoOcr: config.media.ocr,
+    videoDescribe: config.media.describe,
+    videoMaxMinutes: config.media.maxMinutes,
     pageExtensions: config.index.pageExtensions,
     wikiPublicUrl: config.wikiPublicUrl,
     mcpRateLimitPerMinute: config.mcp.rateLimitPerMinute
@@ -490,6 +547,12 @@ function readBool (value: string | undefined, fallback: boolean): boolean {
   const text = value?.trim().toLowerCase()
   if (text === undefined || text.length === 0) { return fallback }
   return !['0', 'false', 'no', 'off'].includes(text)
+}
+
+/** A 0-to-1 setting, such as the scene-change threshold. */
+function readRatio (value: string | undefined, fallback: number): number {
+  const parsed = Number.parseFloat(value ?? '')
+  return Number.isFinite(parsed) && parsed > 0 && parsed <= 1 ? parsed : fallback
 }
 
 function readInt (value: string | undefined, fallback: number): number {

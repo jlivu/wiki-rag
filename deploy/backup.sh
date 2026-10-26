@@ -7,6 +7,13 @@
 # rather than on disk. The index is not backed up on purpose: it can be
 # rebuilt from the wiki in a minute, and it is large.
 #
+# Videos are the one thing the dump does not cover, because they are not
+# in the database: they sit in the media folder on this Mac. They are
+# mirrored rather than dumped — one copy kept in step with rsync, not
+# fourteen dated copies of files that are large and rarely change — and
+# a dated manifest is written beside the dumps so it is possible to say
+# which videos existed on any given day.
+#
 #   deploy/backup.sh            # take a dump now
 #
 # The launch agent in deploy/vu.gov.doft.wiki-backup.plist runs this
@@ -18,6 +25,8 @@ DB_USER="${WIKI_DB_USER:-wikijs}"
 DB_NAME="${WIKI_DB_NAME:-wiki}"
 DEST="${BACKUP_DIR:-$HOME/Backups/wiki-rag}"
 KEEP_DAYS="${BACKUP_KEEP_DAYS:-14}"
+MEDIA_DIR="${MEDIA_HOST_DIR:-$HOME/Media/wiki}"
+MEDIA_DEST="${MEDIA_BACKUP_DIR:-$DEST/media}"
 
 mkdir -p "$DEST"
 stamp="$(date +%Y-%m-%d-%H%M)"
@@ -71,3 +80,24 @@ find "$DEST" -name 'wiki-*.dump.part' -type f -mtime +1 -delete 2>/dev/null || t
 
 count="$(ls -1 "$DEST"/wiki-*.dump 2>/dev/null | wc -l | tr -d ' ')"
 echo "backup: $count dump(s) in $DEST"
+
+# ── the videos ──────────────────────────────────────────────────────
+#
+# Not in the dump, because they are not in the database. One mirror,
+# kept in step: a video that is deleted from the media folder is deleted
+# from the mirror on the next run, so the manifest beside each dump is
+# what says it was ever there.
+if [ -d "$MEDIA_DIR" ]; then
+  mkdir -p "$MEDIA_DEST"
+  # --delete so the mirror matches, --partial so an interrupted copy of
+  # a large file resumes rather than starting again.
+  rsync -a --delete --partial "$MEDIA_DIR"/ "$MEDIA_DEST"/
+  manifest="$DEST/media-$stamp.txt"
+  ( cd "$MEDIA_DIR" && find . -type f -not -name '.*' -exec ls -l {} \; ) | sort -k9 > "$manifest"
+  videos="$(grep -ciE '\.(mp4|mov|m4v|webm)$' "$manifest" || true)"
+  mirrored="$(du -sh "$MEDIA_DEST" | cut -f1)"
+  echo "backup: $videos video(s), $mirrored mirrored to $MEDIA_DEST"
+  find "$DEST" -name 'media-*.txt' -type f -mtime "+$KEEP_DAYS" -delete 2>/dev/null || true
+else
+  echo "backup: no media folder at $MEDIA_DIR — nothing to mirror"
+fi

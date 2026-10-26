@@ -5,17 +5,18 @@ import type { Pool } from 'pg'
 
 import {
   documentIdsByPath, existingEmbeddings, imagePathsOnPage, readPage,
-  replaceDocumentLinks, replaceImageText, replacePage, touchPage,
+  replaceDocumentLinks, replaceImageText, replacePage, replaceVideoLinks, touchPage,
   type PageImageText
 } from '../index-db/store.js'
 import type { QueuedJob } from '../index-db/queue.js'
 import { htmlToMarkdown } from '../wiki/markdown.js'
+import { MEDIA_PATH } from '../../shared/index.js'
 import type { WikiAdminClient, WikiPageSource } from '../wiki/admin-client.js'
 
 import { chunkMarkdown, estimateTokens, hash } from './chunker.js'
 import { toVectorLiteral, type Embedder } from './embeddings.js'
 import { forgetPage, requeueImagesOf } from './forget.js'
-import { assetLinksFrom, assetPathOf, type LinkScanOptions } from './links.js'
+import { assetLinksFrom, assetPathOf, mediaLinksFrom, type LinkScanOptions } from './links.js'
 import { imagesIn } from './page-images.js'
 import { hiddenReason, isVisibleNow, readPublishWindow } from './publish-window.js'
 import { tocFromRender } from './toc.js'
@@ -119,6 +120,12 @@ export async function runJob (
   const linked = assetLinksFrom(page.render, links)
   await replaceDocumentLinks(db, page.id, linked)
 
+  // The same, for videos. They are served from the media folder rather
+  // than by the wiki, so their links look different and are scanned
+  // separately.
+  const videos = mediaLinksFrom(page.render, MEDIA_PATH)
+  await replaceVideoLinks(db, page.id, videos)
+
   // What this page calls the images it shows. An image is indexed with
   // that text, so a change here has to reach the image as well.
   const before = await imagePathsOnPage(db, page.id)
@@ -133,6 +140,7 @@ export async function runJob (
 
   return {
     action: 'indexed',
+    ...(videos.length > 0 ? { videoLinks: videos.length } : {}),
     chunks: rows.length,
     embedded: fresh.length,
     ...(linked.length > 0 ? { links: linked.length } : {}),

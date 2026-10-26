@@ -113,6 +113,17 @@ export function FileIcon ({ type }: { type?: string }) {
   )
 }
 
+/** A video: the clapperboard-free version — a frame with a play head. */
+export function VideoIcon () {
+  return (
+    <svg {...base} className="file-icon">
+      <rect x="1.6" y="3.4" width="9.4" height="9.2" rx="1.5" />
+      <path d="M11 7.1l3.2-1.9a0.4 0.4 0 0 1 0.6 0.35v4.9a0.4 0.4 0 0 1-0.6 0.35L11 8.9Z" />
+      <polygon points="5,6.3 8.2,8 5,9.7" />
+    </svg>
+  )
+}
+
 /** A picture: a frame with a horizon and a sun, the usual shorthand. */
 export function ImageIcon () {
   return (

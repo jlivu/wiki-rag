@@ -146,6 +146,18 @@ settings, and the uploaded files, which Wiki.js keeps in the database
 rather than on disk. The index is deliberately not backed up — it is
 rebuilt from the wiki in about a minute.
 
+**Videos are the exception.** They are not in the database: they live in
+`~/Media/wiki` on this Mac, mounted read-only into the AI service, which
+is what makes them seekable and keeps them out of fourteen daily dumps.
+The same script mirrors that folder to `~/Backups/wiki-rag/media` with
+`rsync -a --delete` — one copy kept in step, not a dated copy a day — and
+writes `media-<date>.txt` beside each dump listing what was there, so it
+is possible to say which videos existed on a given day even though the
+mirror only holds today's. Set `MEDIA_HOST_DIR` if the folder is
+elsewhere. A deleted video disappears from the mirror on the next run, so
+if the folder itself is the only copy of something, keep a copy of the
+mirror too.
+
 ```bash
 deploy/backup.sh                    # dump now, into ~/Backups/wiki-rag
 ```
@@ -248,6 +260,14 @@ a content page and `/login` with its network tab recorded.
 | --- | --- |
 | Image's own config, default logo | 3 to `graph.requarks.io` within a second of startup, plus one per page view to `static.requarks.io` from the browser |
 | **This stack** (`offline: true`, logo set) | **none, from the server or the browser** |
+
+Videos change nothing here. They are read entirely on this Mac — ffmpeg
+and Tesseract in the container, whisper.cpp natively — and served from
+the media folder to signed-in readers. The one exception is switched off:
+`VIDEO_DESCRIBE=1` would send sampled frames to whichever model
+`IMAGE_DESCRIBER` names, exactly as an uploaded image is sent. It is `0`
+by default; leave it there unless the cost and the exposure are both
+wanted.
 
 ### Stopped, and how
 

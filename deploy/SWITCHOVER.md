@@ -234,6 +234,19 @@ recreates the containers from the same file and the same volumes. See
 
 ## 7. Start production on the same data
 
+The media folder has to exist before the stack starts: Docker would
+otherwise create a directory in its place, owned by root, and the AI
+service would report videos as off.
+
+```bash
+mkdir -p ~/Media/wiki
+```
+
+That folder is where videos live — not in Wiki.js, which would make them
+unseekable and put every one of them in all fourteen daily dumps. It is
+mounted read-only at `/media`. Set `MEDIA_HOST_DIR` in `.env.prod` to put
+it somewhere else.
+
 ```bash
 cd ~/Workspaces/Wiki/wiki-rag/deploy
 docker compose --env-file .env.prod -f docker-compose.prod.yml up -d
@@ -637,7 +650,18 @@ curl -s http://localhost:8088/ai/health | python3 -m json.tool
 docker exec wiki-prod-ai-db psql -U wiki_ai -d wiki_ai \
   -c "SELECT (SELECT count(*) FROM index_pages) AS pages,
              (SELECT count(*) FROM index_documents) AS documents,
+             (SELECT count(*) FROM index_videos) AS videos,
              (SELECT count(*) FROM index_chunks) AS chunks;"
+```
+
+Videos, if any have been put in `~/Media/wiki`, are read at about two
+seconds per minute of recording, one at a time. The service reports what
+it is working on:
+
+```bash
+docker exec wiki-prod-ai \
+  node -e "fetch('http://127.0.0.1:4000/internal/status?compare=0')
+    .then(r => r.json()).then(j => console.log(JSON.stringify(j.media)))"
 ```
 
 ## 13. Check it properly
@@ -646,6 +670,13 @@ docker exec wiki-prod-ai-db psql -U wiki_ai -d wiki_ai \
 - [ ] All three pages read correctly — the two that were already there,
       plus `sops/sqlserver-restore` — and the coat of arms image displays
 - [ ] Edit a page, save it, and it saves
+- [ ] `~/Media/wiki` exists and the index status reports
+      `media.enabled: true` (it says why if not)
+- [ ] If a video has been put there: it is in `index_videos`, a question
+      about it is answered with a **Video · m:ss–m:ss** source, and the
+      link opens the recording at that moment
+- [ ] Signed out, `http://localhost:8088/ai/media/<any video>` answers
+      401 — videos are for signed-in readers only
 - [ ] The assistant panel opens from the launcher at the bottom right
 - [ ] A question about something in the wiki is answered **with sources**,
       and a source link opens the right page in a new tab

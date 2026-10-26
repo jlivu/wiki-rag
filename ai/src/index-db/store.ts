@@ -28,6 +28,9 @@ export interface ChunkInput {
   location?: string
   /** For an image: 'ocr', 'alt' or 'description'. Empty for text. */
   origin?: string
+  /** Videos: seconds from the start of the recording. */
+  startsAt?: number
+  endsAt?: number
   text: string
   contentHash: string
   tokens: number
@@ -53,7 +56,7 @@ export interface IndexedDocument {
   reason: string
 }
 
-export type DocumentStatus = 'indexed' | 'needs_ocr' | 'skipped' | 'failed'
+export type DocumentStatus = 'indexed' | 'needs_ocr' | 'skipped' | 'failed' | 'queued'
 
 export async function listIndexedPages (db: Pool): Promise<Array<{ id: number, updatedAt: string }>> {
   const { rows } = await db.query<{ id: number, updated_at: Date }>(
@@ -123,21 +126,23 @@ export async function replacePage (
 /** Chunks belong to a page or to a document; the rows are otherwise alike. */
 async function insertChunks (
   client: PoolClient,
-  owner: { pageId: number } | { documentId: number },
+  owner: { pageId: number } | { documentId: number } | { videoId: number },
   chunks: Array<ChunkInput & { embeddingLiteral: string }>,
   embedModel: string
 ): Promise<void> {
   const pageId = 'pageId' in owner ? owner.pageId : null
   const documentId = 'documentId' in owner ? owner.documentId : null
+  const videoId = 'videoId' in owner ? owner.videoId : null
   for (const chunk of chunks) {
     await client.query(`
       INSERT INTO index_chunks
-        (page_id, document_id, ordinal, heading_path, anchor, location, origin,
-         text, content_hash, embed_model, tokens, embedding)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::vector)
+        (page_id, document_id, video_id, ordinal, heading_path, anchor, location, origin,
+         starts_at, ends_at, text, content_hash, embed_model, tokens, embedding)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::vector)
     `, [
-      pageId, documentId, chunk.ordinal, chunk.headingPath, chunk.anchor, chunk.location ?? '',
-      chunk.origin ?? '', chunk.text, chunk.contentHash, embedModel, chunk.tokens, chunk.embeddingLiteral
+      pageId, documentId, videoId, chunk.ordinal, chunk.headingPath, chunk.anchor,
+      chunk.location ?? '', chunk.origin ?? '', chunk.startsAt ?? null, chunk.endsAt ?? null,
+      chunk.text, chunk.contentHash, embedModel, chunk.tokens, chunk.embeddingLiteral
     ])
   }
 }
@@ -203,6 +208,8 @@ export interface IndexStats {
   documents: number
   /** Files listed but not indexed: an image, too large, or unreadable. */
   skippedDocuments: number
+  videos: number
+  skippedVideos: number
   chunks: number
   embedModel: string | null
   embedDims: number | null
@@ -211,13 +218,15 @@ export interface IndexStats {
 
 export async function readStats (db: Pool): Promise<IndexStats> {
   const { rows } = await db.query<{
-    pages: string, documents: string, skipped: string, chunks: string,
-    embed_model: string | null, embed_dims: number | null, last_indexed: Date | null
+    pages: string, documents: string, skipped: string, videos: string, skipped_videos: string,
+    chunks: string, embed_model: string | null, embed_dims: number | null, last_indexed: Date | null
   }>(`
     SELECT
       (SELECT count(*)::text FROM index_pages) AS pages,
       (SELECT count(*)::text FROM index_documents WHERE status = 'indexed') AS documents,
       (SELECT count(*)::text FROM index_documents WHERE status <> 'indexed') AS skipped,
+      (SELECT count(*)::text FROM index_videos WHERE status = 'indexed') AS videos,
+      (SELECT count(*)::text FROM index_videos WHERE status NOT IN ('indexed', 'queued')) AS skipped_videos,
       (SELECT count(*)::text FROM index_chunks) AS chunks,
       (SELECT embed_model FROM index_meta WHERE id) AS embed_model,
       (SELECT embed_dims FROM index_meta WHERE id) AS embed_dims,
@@ -228,6 +237,8 @@ export async function readStats (db: Pool): Promise<IndexStats> {
     pages: Number(row?.pages ?? 0),
     documents: Number(row?.documents ?? 0),
     skippedDocuments: Number(row?.skipped ?? 0),
+    videos: Number(row?.videos ?? 0),
+    skippedVideos: Number(row?.skipped_videos ?? 0),
     chunks: Number(row?.chunks ?? 0),
     embedModel: row?.embed_model ?? null,
     embedDims: row?.embed_dims ?? null,
@@ -325,6 +336,200 @@ export async function removeDocument (db: Pool, id: number): Promise<number> {
     `, [contentHash])
     return rowCount ?? 0
   })
+}
+
+/* ── videos ────────────────────────────────────────────────────────── */
+
+/** One video in the media folder, as the index holds it. */
+export interface IndexedVideo {
+  /** Ours, not Wiki.js's: videos are not assets. */
+  id: number
+  /** Relative to the media folder: "training/quarterly-training.mp4". */
+  path: string
+  fileName: string
+  ext: string
+  title: string
+  fileSize: number
+  modifiedAt: string
+  durationSeconds: number
+  width: number
+  height: number
+  /** Size, modification time and the subtitle file beside it. */
+  sourceHash: string
+  /** Where the words came from: subtitles-file, subtitles-embedded, speech, none. */
+  speechSource: string
+  frames: number
+  status: DocumentStatus
+  reason: string
+}
+
+export async function listIndexedVideos (
+  db: Pool
+): Promise<Array<{ id: number, path: string, sourceHash: string }>> {
+  const { rows } = await db.query<{ id: number, path: string, source_hash: string }>(
+    'SELECT id, path, source_hash FROM index_videos'
+  )
+  return rows.map(row => ({ id: row.id, path: row.path, sourceHash: row.source_hash }))
+}
+
+export async function readVideo (db: Pool, id: number): Promise<IndexedVideo | null> {
+  const { rows } = await db.query<VideoRow>('SELECT * FROM index_videos WHERE id = $1', [id])
+  const row = rows[0]
+  return row ? toVideo(row) : null
+}
+
+export async function readVideoByPath (db: Pool, path: string): Promise<IndexedVideo | null> {
+  const { rows } = await db.query<VideoRow>('SELECT * FROM index_videos WHERE path = $1', [path])
+  const row = rows[0]
+  return row ? toVideo(row) : null
+}
+
+/**
+ * A video the scanner has just found, so there is a row — and an id — to
+ * queue a job against. Everything but the path is filled in by the job.
+ */
+export async function claimVideoId (
+  db: Pool,
+  file: { path: string, fileName: string, ext: string, title: string, fileSize: number, modifiedAt: string }
+): Promise<number> {
+  const { rows } = await db.query<{ id: number }>(`
+    INSERT INTO index_videos (path, file_name, ext, title, file_size, modified_at, status, reason)
+    VALUES ($1, $2, $3, $4, $5, $6, 'queued', '')
+    ON CONFLICT (path) DO UPDATE SET file_name = EXCLUDED.file_name
+    RETURNING id
+  `, [file.path, file.fileName, file.ext, file.title, file.fileSize, file.modifiedAt])
+  return rows[0]?.id as number
+}
+
+/** Replace everything the index holds for one video, in one transaction. */
+export async function replaceVideo (
+  db: Pool,
+  video: IndexedVideo,
+  chunks: Array<ChunkInput & { embeddingLiteral: string }>,
+  embedModel: string,
+  /** Content hashes of the frames that were described, if any. */
+  describedFrames: string[] = []
+): Promise<void> {
+  await withTransaction(db, async client => {
+    await client.query(`
+      INSERT INTO index_videos
+        (id, path, file_name, ext, title, file_size, modified_at, duration, width, height,
+         source_hash, speech_source, frames, status, reason, indexed_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+      ON CONFLICT (id) DO UPDATE SET
+        path = EXCLUDED.path, file_name = EXCLUDED.file_name, ext = EXCLUDED.ext,
+        title = EXCLUDED.title, file_size = EXCLUDED.file_size,
+        modified_at = EXCLUDED.modified_at, duration = EXCLUDED.duration,
+        width = EXCLUDED.width, height = EXCLUDED.height, source_hash = EXCLUDED.source_hash,
+        speech_source = EXCLUDED.speech_source, frames = EXCLUDED.frames,
+        status = EXCLUDED.status, reason = EXCLUDED.reason, indexed_at = now()
+    `, [
+      video.id, video.path, video.fileName, video.ext, video.title, video.fileSize,
+      video.modifiedAt, video.durationSeconds, video.width, video.height, video.sourceHash,
+      video.speechSource, video.frames, video.status, video.reason
+    ])
+
+    // A video moved onto a path an older, since-deleted row still holds.
+    await client.query('DELETE FROM index_videos WHERE path = $1 AND id <> $2', [video.path, video.id])
+
+    await client.query('DELETE FROM index_chunks WHERE video_id = $1', [video.id])
+    await insertChunks(client, { videoId: video.id }, chunks, embedModel)
+
+    // So the orphan sweep knows these descriptions are still spoken for.
+    await client.query('DELETE FROM index_video_frames WHERE video_id = $1', [video.id])
+    for (const contentHash of new Set(describedFrames)) {
+      await client.query(
+        'INSERT INTO index_video_frames (video_id, content_hash) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [video.id, contentHash]
+      )
+    }
+  })
+}
+
+export async function removeVideo (db: Pool, id: number): Promise<void> {
+  // Chunks go with it: the foreign key cascades.
+  await db.query('DELETE FROM index_videos WHERE id = $1', [id])
+}
+
+/** Embeddings already held for this video, by chunk hash. */
+export async function existingVideoEmbeddings (db: Pool, videoId: number): Promise<Map<string, string>> {
+  return embeddingsWhere(db, 'video_id = $1', videoId)
+}
+
+/** Replace the media links found on one page. */
+export async function replaceVideoLinks (db: Pool, pageId: number, videoPaths: string[]): Promise<void> {
+  await withTransaction(db, async client => {
+    await client.query('DELETE FROM index_video_links WHERE page_id = $1', [pageId])
+    for (const path of new Set(videoPaths)) {
+      await client.query(
+        'INSERT INTO index_video_links (video_path, page_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+        [path, pageId]
+      )
+    }
+  })
+}
+
+/** The pages that link to a video, for the "Linked from" line. */
+export async function linkingPagesForVideo (db: Pool, videoPath: string, limit = 5): Promise<LinkingPage[]> {
+  const { rows } = await db.query<{ id: number, title: string, path: string, locale: string }>(`
+    SELECT p.id, p.title, p.path, p.locale
+    FROM index_video_links l
+    JOIN index_pages p ON p.id = l.page_id
+    WHERE l.video_path = $1
+    ORDER BY p.title
+    LIMIT $2
+  `, [videoPath, limit])
+  return rows
+}
+
+/** Every chunk of one video, in order: what get_document reads. */
+export async function videoChunks (
+  db: Pool,
+  videoId: number
+): Promise<Array<{ ordinal: number, location: string, anchor: string, text: string }>> {
+  const { rows } = await db.query<{ ordinal: number, location: string, anchor: string, text: string }>(
+    'SELECT ordinal, location, anchor, text FROM index_chunks WHERE video_id = $1 ORDER BY ordinal',
+    [videoId]
+  )
+  return rows
+}
+
+interface VideoRow {
+  id: number
+  path: string
+  file_name: string
+  ext: string
+  title: string
+  file_size: string
+  modified_at: Date
+  duration: number
+  width: number
+  height: number
+  source_hash: string
+  speech_source: string
+  frames: number
+  status: DocumentStatus
+  reason: string
+}
+
+function toVideo (row: VideoRow): IndexedVideo {
+  return {
+    id: row.id,
+    path: row.path,
+    fileName: row.file_name,
+    ext: row.ext,
+    title: row.title,
+    fileSize: Number(row.file_size),
+    modifiedAt: row.modified_at.toISOString(),
+    durationSeconds: Number(row.duration),
+    width: row.width,
+    height: row.height,
+    sourceHash: row.source_hash,
+    speechSource: row.speech_source,
+    frames: row.frames,
+    status: row.status,
+    reason: row.reason
+  }
 }
 
 /* ── which pages link to a file ────────────────────────────────────── */
@@ -600,6 +805,12 @@ export async function forgetOrphanedDescriptions (db: Pool): Promise<number> {
     WHERE NOT EXISTS (
       SELECT 1 FROM index_documents doc WHERE doc.source_hash = d.content_hash
     )
+    -- A video's frames are described the same way and kept in the same
+    -- table; index_video_frames is what says a frame still belongs to a
+    -- recording the index holds.
+    AND NOT EXISTS (
+      SELECT 1 FROM index_video_frames f WHERE f.content_hash = d.content_hash
+    )
   `)
   return rowCount ?? 0
 }
@@ -610,10 +821,14 @@ export async function indexCounts (db: Pool): Promise<{
   pagesWithoutChunks: number
   documents: number
   skippedDocuments: number
+  videos: number
+  videosWithoutChunks: number
+  skippedVideos: number
   chunks: number
   imageDescriptions: number
   imageTextRows: number
   documentLinks: number
+  videoLinks: number
 }> {
   const { rows } = await db.query<Record<string, string>>(`
     SELECT
@@ -622,10 +837,15 @@ export async function indexCounts (db: Pool): Promise<{
         WHERE NOT EXISTS (SELECT 1 FROM index_chunks c WHERE c.page_id = p.id))::text AS pages_without_chunks,
       (SELECT count(*) FROM index_documents WHERE status = 'indexed')::text AS documents,
       (SELECT count(*) FROM index_documents WHERE status <> 'indexed')::text AS skipped_documents,
+      (SELECT count(*) FROM index_videos WHERE status = 'indexed')::text AS videos,
+      (SELECT count(*) FROM index_videos v WHERE v.status = 'indexed'
+        AND NOT EXISTS (SELECT 1 FROM index_chunks c WHERE c.video_id = v.id))::text AS videos_without_chunks,
+      (SELECT count(*) FROM index_videos WHERE status NOT IN ('indexed', 'queued'))::text AS skipped_videos,
       (SELECT count(*) FROM index_chunks)::text AS chunks,
       (SELECT count(*) FROM index_image_descriptions)::text AS image_descriptions,
       (SELECT count(*) FROM index_image_text)::text AS image_text_rows,
-      (SELECT count(*) FROM index_document_links)::text AS document_links
+      (SELECT count(*) FROM index_document_links)::text AS document_links,
+      (SELECT count(*) FROM index_video_links)::text AS video_links
   `)
   const row = rows[0] ?? {}
   const n = (key: string): number => Number(row[key] ?? 0)
@@ -634,10 +854,14 @@ export async function indexCounts (db: Pool): Promise<{
     pagesWithoutChunks: n('pages_without_chunks'),
     documents: n('documents'),
     skippedDocuments: n('skipped_documents'),
+    videos: n('videos'),
+    videosWithoutChunks: n('videos_without_chunks'),
+    skippedVideos: n('skipped_videos'),
     chunks: n('chunks'),
     imageDescriptions: n('image_descriptions'),
     imageTextRows: n('image_text_rows'),
-    documentLinks: n('document_links')
+    documentLinks: n('document_links'),
+    videoLinks: n('video_links')
   }
 }
 

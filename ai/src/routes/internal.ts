@@ -119,12 +119,16 @@ function summarise (report: Awaited<ReturnType<Indexer['report']>>): string {
   const wiki = report.wiki
     ? `the wiki has ${report.wiki.pages} page(s) and ${report.wiki.files} file(s)`
     : 'the wiki could not be asked what it holds'
-  const index = `the index has ${report.index.pages} page(s), ${report.index.documents} file(s) ` +
-    `and ${report.index.chunks} chunk(s)`
+  const index = `the index has ${report.index.pages} page(s), ${report.index.documents} file(s), ` +
+    `${report.index.videos} video(s) and ${report.index.chunks} chunk(s)`
+  const media = report.media.enabled
+    ? `the media folder holds ${report.media.files} video(s)` +
+      (report.media.working ? `, reading ${report.media.working.path} (${report.media.working.stage})` : '')
+    : `videos are off: ${report.media.reason ?? 'no media folder'}`
   const last = report.lastReconcile
     ? `last reconciled ${report.lastReconcile.at} (${report.lastReconcile.trigger}` +
       `${report.lastReconcile.ok ? '' : ', which failed'})`
     : 'no reconciliation has run yet'
   const drift = report.drift.note.length > 0 ? `out of step: ${report.drift.note.join('; ')}` : 'in step'
-  return `${index}; ${wiki}; ${last}; ${drift}`
+  return `${index}; ${wiki}; ${media}; ${last}; ${drift}`
 }

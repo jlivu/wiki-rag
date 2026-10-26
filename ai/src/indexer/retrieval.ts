@@ -19,7 +19,7 @@ import type { FastifyBaseLogger } from 'fastify'
 import type { Pool } from 'pg'
 
 import { chunkCount, searchChunks, type ChunkHit } from '../index-db/search.js'
-import { linkingPages, type LinkingPage } from '../index-db/store.js'
+import { linkingPages, linkingPagesForVideo, type LinkingPage } from '../index-db/store.js'
 import type { PermissionCache, ResourceKind } from '../wiki/permission-cache.js'
 import { WikiClient, WikiError } from '../wiki/client.js'
 
@@ -72,7 +72,21 @@ export interface RetrievedDocument extends RetrievedBase {
   linkedFrom: Array<{ title: string, path: string, locale: string }>
 }
 
-export type RetrievedItem = RetrievedPage | RetrievedDocument
+export interface RetrievedVideo extends RetrievedBase {
+  kind: 'video'
+  id: number
+  fileName: string
+  /** Seconds from the start of the recording, for the "#t=" link. */
+  startsAt: number
+  endsAt: number
+  durationSeconds: number
+  /** What a citation shows: "12:34–14:02". */
+  location: string
+  /** The pages that link to this video, as far as the reader may see. */
+  linkedFrom: Array<{ title: string, path: string, locale: string }>
+}
+
+export type RetrievedItem = RetrievedPage | RetrievedDocument | RetrievedVideo
 
 export interface RetrievalResult {
   results: RetrievedItem[]
@@ -136,7 +150,9 @@ export class Retriever {
       results.push(
         item.kind === 'document'
           ? { ...item, linkedFrom: await this.#linkedFrom(reader, readerToken, item.path) }
-          : item
+          : item.kind === 'video'
+            ? { ...item, linkedFrom: await this.#linkedFrom(reader, readerToken, item.path, 'video') }
+            : item
       )
     }
 
@@ -147,14 +163,22 @@ export class Retriever {
   async #canRead (reader: WikiClient, token: string | null, item: RetrievedItem): Promise<Access> {
     const kind: ResourceKind = item.kind
     const locale = item.kind === 'page' ? item.locale : ''
-    const cached = this.#permissions.get(token, kind, locale, item.path)
+    // One entry covers every video: the answer is about the reader, not
+    // about the file.
+    const key = item.kind === 'video' ? '' : item.path
+    const cached = this.#permissions.get(token, kind, locale, key)
     // The cache remembers yes and no. A hit that turned out not to exist
     // was cached as "no", which is true for this reader either way, and
     // its removal is already queued.
     if (cached !== undefined) { return cached ? 'yes' : 'no' }
 
     let access: Access = 'no'
-    if (item.kind === 'page') {
+    if (item.kind === 'video') {
+      // Videos are not wiki assets and have no per-file permission: the
+      // media folder is open to anyone with a wiki login, which is what
+      // the /ai/media route enforces when the video is actually played.
+      access = await reader.isSignedIn() ? 'yes' : 'no'
+    } else if (item.kind === 'page') {
       // The same request get_page makes, so the answer is the same answer.
       try {
         await reader.fetchPage(item.path, item.locale)
@@ -166,7 +190,7 @@ export class Retriever {
       access = await reader.canReadAsset(item.path)
     }
 
-    this.#permissions.set(token, kind, locale, item.path, access === 'yes')
+    this.#permissions.set(token, kind, locale, key, access === 'yes')
     return access
   }
 
@@ -175,8 +199,12 @@ export class Retriever {
     try {
       if (item.kind === 'page') {
         await forgetStalePage(this.#db, item.id, item.path, item.locale, this.#log)
-      } else {
+      } else if (item.kind === 'document') {
         await forgetStaleDocument(this.#db, item.id, item.path, this.#log)
+      } else {
+        // A video cannot answer "missing": the folder sweep is what
+        // notices a file has gone.
+        return
       }
     } catch (err) {
       // Never let housekeeping break an answer.
@@ -191,11 +219,14 @@ export class Retriever {
   async #linkedFrom (
     reader: WikiClient,
     token: string | null,
-    assetPath: string
+    assetPath: string,
+    kind: 'document' | 'video' = 'document'
   ): Promise<Array<{ title: string, path: string, locale: string }>> {
     let pages: LinkingPage[]
     try {
-      pages = await linkingPages(this.#db, assetPath, MAX_LINKS + 2)
+      pages = kind === 'video'
+        ? await linkingPagesForVideo(this.#db, assetPath, MAX_LINKS + 2)
+        : await linkingPages(this.#db, assetPath, MAX_LINKS + 2)
     } catch (err) {
       this.#log.warn({ err, assetPath }, 'the pages linking to a file could not be read')
       return []
@@ -246,6 +277,25 @@ function group (hits: ChunkHit[]): RetrievedItem[] {
       const first = best[0] as ChunkHit
       const snippet = best.map(hit => snippetOf(hit)).join('\n\n…\n\n')
       const score = Number(entry.score.toFixed(6))
+
+      if (first.kind === 'video') {
+        return {
+          kind: 'video' as const,
+          id: first.ownerId,
+          title: first.title || first.fileName,
+          fileName: first.fileName,
+          path: first.path,
+          startsAt: first.startsAt ?? 0,
+          endsAt: first.endsAt ?? 0,
+          durationSeconds: first.durationSeconds,
+          location: first.location,
+          anchor: first.anchor,
+          snippet,
+          updatedAt: first.updatedAt,
+          score,
+          linkedFrom: []
+        }
+      }
 
       if (first.kind === 'document') {
         return {

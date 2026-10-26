@@ -35,14 +35,16 @@ export interface Source extends PageLink {
   section?: string
   /** Wiki.js's anchor for that section, or "#page=4" in a PDF. */
   anchor?: string
-  /** "document" for an uploaded file; a page otherwise. */
-  kind?: 'page' | 'document'
-  /** Documents: the file's own name, e.g. "generator-manual.pdf". */
+  /** "document" for an uploaded file, "video" for a recording in the media folder. */
+  kind?: 'page' | 'document' | 'video'
+  /** Documents and videos: the file's own name, e.g. "generator-manual.pdf". */
   fileName?: string
   /** Documents: pdf, docx, xlsx, pptx or csv — which icon to draw. */
   fileType?: string
-  /** Documents: where in the file, e.g. "Page 4" or "Slide 7". */
+  /** Where in the file: "Page 4", "Slide 7", or a video's "12:34–14:02". */
   location?: string
+  /** Videos: seconds from the start, which the link opens at. */
+  startsAt?: number
   /**
    * Images: where this text came from — 'ocr' (text in the image), 'alt'
    * (what the pages call it) or 'description' (written by a model).
@@ -282,10 +284,10 @@ function readSources (value: unknown): SourcesArgs {
 function readSource (value: unknown, path: string): Source {
   const item = obj(value, path)
   const rawKind = optStr(item.kind, `${path}.kind`)
-  if (rawKind !== undefined && rawKind !== 'page' && rawKind !== 'document') {
-    throw new Error(`${path}.kind has to be "page" or "document"`)
+  if (rawKind !== undefined && rawKind !== 'page' && rawKind !== 'document' && rawKind !== 'video') {
+    throw new Error(`${path}.kind has to be "page", "document" or "video"`)
   }
-  const kind: 'page' | 'document' | undefined = rawKind
+  const kind: 'page' | 'document' | 'video' | undefined = rawKind
   const linkedFrom = item.linkedFrom === undefined
     ? undefined
     : list(item.linkedFrom, `${path}.linkedFrom`, (entry, at) => readPageLink(obj(entry, at), at), 0)
@@ -299,6 +301,7 @@ function readSource (value: unknown, path: string): Source {
     ...optional('fileName', optStr(item.fileName, `${path}.fileName`)),
     ...optional('fileType', optStr(item.fileType, `${path}.fileType`)),
     ...optional('location', optStr(item.location, `${path}.location`)),
+    ...optional('startsAt', optNum(item.startsAt, `${path}.startsAt`)),
     ...optional('origin', optStr(item.origin, `${path}.origin`)),
     ...(linkedFrom === undefined ? {} : { linkedFrom })
   }
@@ -380,6 +383,15 @@ function str (value: unknown, path: string): string {
 function optStr (value: unknown, path: string): string | undefined {
   if (value === undefined || value === null) { return undefined }
   return str(value, path)
+}
+
+/** A whole-or-fractional number of seconds, for a video's start time. */
+function optNum (value: unknown, path: string): number | undefined {
+  if (value === undefined || value === null) { return undefined }
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`${path} must be a number of seconds`)
+  }
+  return value
 }
 
 function list<T> (value: unknown, path: string, read: (item: unknown, path: string) => T, min = 0): T[] {

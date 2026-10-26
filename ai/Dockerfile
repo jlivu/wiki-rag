@@ -11,11 +11,17 @@ WORKDIR /app
 # pdftoppm renders a PDF page to a PNG for it, and pdfinfo counts the
 # pages. Together they add about 110 MB to the image, most of it libicu,
 # which tesseract-ocr depends on.
+#
+# ffmpeg and ffprobe read the videos in the media folder: ffprobe for the
+# duration and which streams a file has, ffmpeg to pull out the audio for
+# whisper.cpp, the frames to OCR and any embedded subtitle track. About
+# 150 MB more, and the only way to get timestamps out of a video.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       tesseract-ocr \
       tesseract-ocr-eng \
       poppler-utils \
+      ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 # Dependencies first, so editing the source does not reinstall them.

@@ -142,6 +142,27 @@ export class WikiClient {
     }
   }
 
+  /**
+   * Whether the token belongs to a real, signed-in reader.
+   *
+   * Videos are not Wiki.js assets, so there is no `read:assets` to apply
+   * to them: the rule is that the media folder is open to anyone with a
+   * wiki login and to nobody else. `users.profile` is the probe, because
+   * Wiki.js refuses it for the guest account and answers it for a signed-
+   * in user — the same question the MCP server asks of an API key.
+   */
+  async isSignedIn (): Promise<boolean> {
+    if (this.#token === null) { return false }
+    try {
+      const data = await this.graphql<{ users?: { profile?: { id?: number } } }>(
+        '{ users { profile { id } } }', {}
+      )
+      return typeof data.users?.profile?.id === 'number'
+    } catch {
+      return false
+    }
+  }
+
   async #fetch (path: string, init: RequestInit): Promise<Response> {
     const headers = new Headers(init.headers)
     if (this.#token) {

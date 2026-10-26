@@ -187,6 +187,77 @@ const MIGRATIONS: Migration[] = [
       ALTER TABLE index_pages ADD COLUMN IF NOT EXISTS publish_end   timestamptz;
       CREATE INDEX IF NOT EXISTS index_pages_window ON index_pages (publish_start, publish_end);
     `
+  },
+  {
+    // Videos live in a folder on this Mac, not in Wiki.js's database, so
+    // they are numbered here rather than by the wiki. A chunk belongs to
+    // exactly one of the three kinds of owner, and a video's chunk also
+    // carries the moment in the video it came from.
+    name: '012-videos',
+    sql: `
+      CREATE TABLE IF NOT EXISTS index_videos (
+        id            serial PRIMARY KEY,
+        -- Relative to the media folder: "training/quarterly-training.mp4".
+        path          text NOT NULL,
+        file_name     text NOT NULL,
+        ext           text NOT NULL DEFAULT '',
+        title         text NOT NULL DEFAULT '',
+        file_size     bigint NOT NULL DEFAULT 0,
+        modified_at   timestamptz NOT NULL,
+        duration      double precision NOT NULL DEFAULT 0,
+        width         integer NOT NULL DEFAULT 0,
+        height        integer NOT NULL DEFAULT 0,
+        -- Size, modification time and the subtitle file beside it: what
+        -- decides whether this video has to be read again.
+        source_hash   text NOT NULL DEFAULT '',
+        -- subtitles-file, subtitles-embedded, speech or none.
+        speech_source text NOT NULL DEFAULT '',
+        frames        integer NOT NULL DEFAULT 0,
+        status        text NOT NULL DEFAULT 'indexed',
+        reason        text NOT NULL DEFAULT '',
+        indexed_at    timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS index_videos_path ON index_videos (path);
+
+      ALTER TABLE index_chunks
+        ADD COLUMN IF NOT EXISTS video_id integer REFERENCES index_videos (id) ON DELETE CASCADE;
+      -- Seconds from the start, so a citation can open the video there.
+      ALTER TABLE index_chunks ADD COLUMN IF NOT EXISTS starts_at double precision;
+      ALTER TABLE index_chunks ADD COLUMN IF NOT EXISTS ends_at   double precision;
+      ALTER TABLE index_chunks DROP CONSTRAINT IF EXISTS index_chunks_owner;
+      ALTER TABLE index_chunks
+        ADD CONSTRAINT index_chunks_owner CHECK (num_nonnulls(page_id, document_id, video_id) = 1);
+      CREATE UNIQUE INDEX IF NOT EXISTS index_chunks_video_ordinal ON index_chunks (video_id, ordinal);
+      CREATE INDEX IF NOT EXISTS index_chunks_video_hash ON index_chunks (video_id, content_hash);
+
+      -- Which pages embed or link to a video, for "Linked from". Kept
+      -- apart from index_document_links because a media path and an
+      -- asset path are different namespaces.
+      CREATE TABLE IF NOT EXISTS index_video_links (
+        video_path text NOT NULL,
+        page_id    integer NOT NULL REFERENCES index_pages (id) ON DELETE CASCADE,
+        PRIMARY KEY (video_path, page_id)
+      );
+      CREATE INDEX IF NOT EXISTS index_video_links_page ON index_video_links (page_id);
+    `
+  },
+  {
+    // Which frames of which video were described.
+    //
+    // A description is kept against the picture's content hash, and the
+    // sweep that forgets descriptions nothing refers to any more only
+    // knew about uploaded files — so a frame's description was thrown
+    // away on the next reconciliation and bought again on the next
+    // re-index. This is what the sweep checks for a video.
+    name: '013-video-frames',
+    sql: `
+      CREATE TABLE IF NOT EXISTS index_video_frames (
+        video_id     integer NOT NULL REFERENCES index_videos (id) ON DELETE CASCADE,
+        content_hash text NOT NULL,
+        PRIMARY KEY (video_id, content_hash)
+      );
+      CREATE INDEX IF NOT EXISTS index_video_frames_hash ON index_video_frames (content_hash);
+    `
   }
 ]
 
@@ -270,6 +341,7 @@ export async function ensureEmbeddingColumn (
       // Everything has to be read and embedded again.
       await client.query('TRUNCATE index_pages CASCADE')
       await client.query('TRUNCATE index_documents CASCADE')
+      await client.query('TRUNCATE index_videos CASCADE')
     }
     await client.query(`ALTER TABLE index_chunks ADD COLUMN embedding vector(${dims})`)
     await client.query(`

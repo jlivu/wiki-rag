@@ -7,6 +7,8 @@
  * page-to-page links only.
  */
 
+import { isVideoPath } from '../media/library.js'
+
 /** href and src, in that order of likelihood. */
 const ATTRIBUTE = /\b(?:href|src)="([^"]+)"/gi
 /** A locale segment at the front of a URL, which Wiki.js strips itself. */
@@ -31,6 +33,47 @@ export function assetLinksFrom (html: string, options: LinkScanOptions): string[
   }
   ATTRIBUTE.lastIndex = 0
   return [...found]
+}
+
+/**
+ * Which videos a page embeds or links to.
+ *
+ * A video lives in the media folder and is served at /ai/media/..., so
+ * its links look nothing like an asset's and are scanned separately.
+ * Both a <video src> and an ordinary link count, and the "#t=" on the
+ * end is dropped: the page links to the video, whatever moment it points
+ * at.
+ */
+export function mediaLinksFrom (html: string, prefix: string): string[] {
+  if (typeof html !== 'string' || html.length === 0) { return [] }
+
+  const found = new Set<string>()
+  let match = ATTRIBUTE.exec(html)
+  while (match !== null) {
+    const path = mediaPathOf(match[1] ?? '', prefix)
+    // A <track> points at the subtitle file beside the video, which is
+    // not itself a video and is never cited as one.
+    if (path && isVideoPath(path)) { found.add(path) }
+    match = ATTRIBUTE.exec(html)
+  }
+  ATTRIBUTE.lastIndex = 0
+  return [...found]
+}
+
+/** The media path one link points at, or null. */
+export function mediaPathOf (href: string, prefix: string): string | null {
+  const value = decodeHtml(href).trim()
+  if (value.length === 0) { return null }
+  // Absolute or root-relative, as long as it reaches the media route.
+  const at = value.indexOf(prefix)
+  if (at < 0) { return null }
+  if (at > 0 && !/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) { return null }
+
+  const rest = value.slice(at + prefix.length)
+  const [withoutHash = ''] = rest.split('#')
+  const [clean = ''] = withoutHash.split('?')
+  if (clean.length === 0) { return null }
+  return decodePath(clean.replace(/^\/+/, ''))
 }
 
 /** The asset path a link or an image source points at, or null. */

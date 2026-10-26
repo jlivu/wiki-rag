@@ -877,6 +877,230 @@ The module stores nothing and writes no files. It posts
 `{ event, id, path, locale }` and returns immediately: a page save never
 waits for the assistant, and never fails because of it.
 
+## Videos
+
+Recordings are searchable the same way pages and uploaded files are, and a
+citation points at the minute the answer came from: **Video · 12:34–14:02**,
+with a link that opens the recording there.
+
+### Where they live
+
+**Not in Wiki.js.** Wiki.js keeps uploads in its database and loads a whole
+asset into memory the first time it is asked for, so a recording could not
+be seeked until it had been cached, and the nightly dump would carry every
+video in all fourteen days of backups. Videos sit in a folder on this Mac
+instead:
+
+| | Folder on the Mac | Mounted at |
+|---|---|---|
+| Development | `~/Media/wiki-dev` | `/media` (read-only) |
+| Production | `~/Media/wiki` | `/media` (read-only) |
+
+Both are mounted by the compose files; set `MEDIA_HOST_DIR` to point
+somewhere else. The service never writes to the folder. If it is not
+mounted, videos are simply off and the index status says so.
+
+Arrange it however you like — the folders are part of the path a video is
+known by, so `training/2026/quarterly.mp4` reads as well in a citation as
+it does on disk.
+
+**A video uploaded to Wiki.js's assets is recorded as skipped**, with the
+reason "a video; put videos in the media folder". It is not indexed and
+not searchable there.
+
+### Formats
+
+MP4, MOV, M4V and WebM. **MP4 (H.264) plays in every browser** and is the
+one to use if you have a choice; Chrome will not play a `.mov` offered as
+`<source type="video/quicktime">`, though it plays the same file from a
+plain `<video src>`.
+
+### Serving them
+
+`GET /ai/media/<path>` serves a video to **signed-in wiki readers only**: a
+request with no Wiki.js login, or with a token Wiki.js does not accept, is
+refused with 401. The check is the same one the MCP server makes of an API
+key (`users.profile`, which Wiki.js refuses for the guest account), cached
+for a minute so a video's dozens of range requests cost one question.
+
+`GET /ai/media.json` lists what the folder holds, under the same rule, for
+a page that wants to build an index of the recordings.
+
+Range requests are supported, which is what lets the browser jump to
+`#t=754` without fetching everything before it. Only video files and the
+subtitle files beside them are served; nothing else in the folder is
+reachable, and a path that climbs out of it is refused.
+
+It is under `/ai/` rather than at `/media/` for two reasons: the reverse
+proxy already forwards `/ai/*` to this service and nothing else, so no
+proxy rule has to be added or kept in step, and Wiki.js serves uploaded
+files from the site root, where `/media/` would shadow an asset folder of
+that name.
+
+### Embedding a player in a page
+
+Wiki.js's sanitiser keeps `<video>`, `<source>` and `<track>` — checked
+against `html-security`'s DOMPurify configuration, which is DOMPurify's
+default allow-list plus the wiki's own additions. So a page can carry a
+player:
+
+```html
+<video src="/ai/media/demos/payment-run-demo.mp4#t=81" controls
+       preload="metadata" width="640"></video>
+```
+
+With subtitles, and giving `video/mp4` even for a `.mov`:
+
+```html
+<video controls width="640">
+  <source src="/ai/media/briefings/bank-switchover.mov" type="video/mp4">
+  <track kind="captions" src="/ai/media/briefings/bank-switchover.vtt"
+         srclang="en" label="English" default>
+</video>
+```
+
+A reader who is not signed in sees an empty player, because the file
+itself is refused.
+
+### How a video is read
+
+All of it happens on this Mac. One video at a time, in the same queue as
+pages and files, so ffmpeg and Tesseract never take the whole machine
+while somebody is using it.
+
+1. **The words.** A `.srt` or `.vtt` beside the video is used if there is
+   one — it was written by someone who could hear the recording, it
+   already carries the timings, and it costs nothing. Failing that, a
+   subtitle track inside the file. Failing that, the audio goes to
+   whisper.cpp, the same server dictation uses.
+2. **The screen.** Frames at every scene change and at least every
+   `VIDEO_FRAME_SECONDS`, read by Tesseract. A slide that stays up for two
+   minutes is read once: each frame keeps only the lines the one before it
+   did not already have.
+3. **A description of a frame**, if `VIDEO_DESCRIBE=1`. Off by default —
+   see below.
+4. **Chunks by the clock**, about `VIDEO_CHUNK_SECONDS` each, carrying
+   what was said *and* what was on screen for that stretch, with the
+   moment it starts. A cut never falls in the middle of a sentence: a
+   sentence that straddles the boundary starts the next chunk, so a fact
+   said just before a boundary is at the top of the chunk that holds it
+   rather than a minute and a half into it.
+
+#### Transcribing in windows
+
+The audio is sent to whisper.cpp a window at a time (about
+`VIDEO_SPEECH_WINDOW_SECONDS`), cut in a silence wherever there is one
+near the target length rather than through the middle of a word. Three
+reasons: a twenty-minute recording would otherwise be a 38 MB upload held
+in memory at both ends; a reader dictating into the panel would wait
+behind it; and the window's own start time is what gives each line of the
+transcript a place in the recording.
+
+whisper reports where each sentence starts and ends, and those times are
+used, offset by the window's own start. **The launch agent must not pass
+`--no-timestamps`** (it did until 2026-10-26, which was harmless for
+dictation and was the only reason this was ever approximate).
+
+If the server is started with that flag — or any build that reports no
+times — the service notices and falls back: a window's lines are placed
+inside it by how long each one is, which puts a sentence within a few
+seconds of where it was said. The run's log line says which was used,
+`timing: whisper` or `timing: window`.
+
+The difference, measured on the same two recordings before and after the
+flag came out:
+
+| | with `--no-timestamps` | without |
+| --- | --- | --- |
+| Sentences found, four-minute demo | 8 | **21** |
+| Sentences found, 21-minute training | 43 | **84** |
+| Where "payment vouchers are kept for seven years" was cited | 13:33 — 29 s before it is said | **14:02 — the sentence itself** |
+| Chunk boundaries | wherever a window happened to end | on a sentence |
+| Transcribing the 21-minute recording | 24.5 s | 27.1 s |
+
+Timestamps cost about a tenth more transcription time and are worth it:
+a reader sent to 13:33 has to sit through half a minute of the wrong
+slide.
+
+#### Descriptions of frames: off by default
+
+`VIDEO_DESCRIBE=0`. A recording is hundreds of frames, and this is the
+only part of video indexing that is not free. Switched on it obeys every
+rule an uploaded image obeys — `IMAGE_DESCRIBER` picks the model,
+`IMAGE_DESCRIBE_EXCLUDE` excludes folders, `IMAGE_DESCRIBE_DAILY_LIMIT`
+caps the day — and `VIDEO_DESCRIBE_FRAME_CAP` (6) caps one recording,
+spreading the frames it does describe evenly across it. Measured on a
+four-minute demo: three frames, 4,257 input and ~320 output tokens,
+5.5 seconds.
+
+Descriptions are cached by the frame's own bytes, and ffmpeg produces the
+same frame from the same input every time (checked: byte for byte), so
+re-indexing an unchanged recording costs nothing.
+
+#### Nothing about where it was filmed
+
+ffprobe is asked for an explicit list of fields — duration, the stream
+kinds, width and height — so a QuickTime location tag is never even
+parsed. Everything written out (audio slices, frames) carries
+`-map_metadata -1`, and a frame that is sent to a model goes through the
+same `images/prepare.ts` an uploaded image does, which re-encodes it.
+A video's **title comes from its file name**, not from the container's
+title tag. Checked with a file carrying GPS coordinates, an artist and a
+comment: none of it reaches the index.
+
+### Keeping up with the folder
+
+The folder is both watched and swept. Watching is the quick path — a file
+dropped in is usually noticed within a couple of seconds, and Docker
+Desktop does forward file events from the Mac into the container. The
+sweep every `MEDIA_SCAN_SECONDS` is the one the index depends on: it
+catches anything the watch missed, a file copied in while the service was
+down, and anything deleted. It is the same arrangement pages have, where
+the wiki's events are the quick path and reconciliation is the truth.
+
+A file is left alone until it has stopped changing for
+`MEDIA_SETTLE_SECONDS`, so a video still being copied in is not indexed
+half-written. Deleting a file removes it and its chunks from the index on
+the next sweep.
+
+### Reading one, and citing it
+
+`search_wiki` returns videos alongside pages and files, marked
+`"kind": "video"` with the minutes the match covers and a url that already
+carries `#t=`. `get_document` reads a whole transcript — the same tool
+files use — with each part headed by the stretch of time it covers. MCP
+returns exactly the same.
+
+In the panel a video source shows a video icon, the recording's title,
+**Video · 12:34–14:02**, and "Linked from" with the pages that embed or
+link to it; the link opens the recording at that moment in a new tab.
+
+### What it costs in time
+
+Measured on an M1 Max, including everything — ffprobe, silence detection,
+transcription, frames, OCR and embedding:
+
+| Recording | Length | Indexing | Per minute of video |
+|---|---|---|---|
+| `briefings/bank-switchover.mov` (subtitles beside it) | 3:00 | 2.0 s | 0.7 s |
+| `demos/payment-run-demo.mp4` (narrated, transcribed) | 4:00 | 8.2 s | 2.0 s |
+| `training/quarterly-training.mp4` (narrated, transcribed) | 21:00 | 38.9 s | 1.9 s |
+| `demos/format-check.webm` (VP9/Opus) | 0:25 | 1.1 s | 2.7 s |
+
+For the long one that is 27.1 s of transcription and 11.4 s of frames and
+OCR. **About two seconds per minute of video**, and a recording with
+subtitles beside it costs a third of that because nothing has to listen to
+it.
+
+Progress shows in the index status while it runs:
+
+```
+curl -s http://127.0.0.1:4000/internal/status?compare=0 | jq .media
+{ "enabled": true, "directory": "/media", "files": 4, "settling": 0,
+  "working": { "path": "training/quarterly-training.mp4",
+               "stage": "listening", "percent": 52, "seconds": 14 } }
+```
+
 ## Creating a page from a draft card
 
 When the wiki has no answer, the assistant offers a `draft_page` card: a
@@ -969,6 +1193,13 @@ recording stops by itself at `STT_MAX_SECONDS`. The text is inserted at the
 cursor in the message box and **nothing is ever sent for the reader** —
 they read it, fix it and press Send.
 
+What arrives is one paragraph. whisper.cpp puts each segment on its own
+line, and with timestamps enabled it finds more segments, so the same
+words would come back differently shaped depending on how the server was
+started; the route folds the lines together before inserting them. The
+filler check — whisper writes "you" or "Thank you." when it hears nothing
+— runs first, because it recognises silence by the lines it came back as.
+
 ### Speech to text, locally
 
 Whisper runs on this Mac through whisper.cpp, natively rather than in a
@@ -985,6 +1216,19 @@ curl -L -o /opt/homebrew/var/whisper/models/ggml-small.en.bin \
 part numbers and names, and still far quicker than real time. The server
 runs as a launch agent, `~/Library/LaunchAgents/vu.gov.doft.whisper-server.plist`,
 so it starts at login and is restarted if it exits:
+
+```
+whisper-server --host 127.0.0.1 --port 8178 \
+  --model /opt/homebrew/var/whisper/models/ggml-small.en.bin \
+  --language en --threads 8 --suppress-nst
+```
+
+**Do not add `--no-timestamps`.** Dictation would not notice — it asks for
+`response_format=json`, which carries only the text — but the video
+indexer uses whisper's sentence times to place a transcript in the
+recording, and without them a citation can send a reader half a minute
+before the sentence they were promised.
+
 
 ```
 launchctl load   ~/Library/LaunchAgents/vu.gov.doft.whisper-server.plist   # start, and at every login

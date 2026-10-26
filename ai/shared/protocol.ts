@@ -12,6 +12,22 @@ export const AGENT_PATH = '/ai/api/agent'
 export const PANEL_PATH = '/ai/panel/'
 /** MCP over Streamable HTTP, for agents outside the wiki. */
 export const MCP_PATH = '/ai/mcp'
+/**
+ * Videos, served from the media folder on this Mac.
+ *
+ * Under /ai/ rather than at /media/ for two reasons: the reverse proxy
+ * forwards /ai/* to this service and nothing else, so no proxy rule has
+ * to be added or kept in step; and Wiki.js serves uploaded files from
+ * the site root, so /media/ would shadow an asset folder of that name.
+ */
+export const MEDIA_PATH = '/ai/media/'
+
+/** The URL of one video, at a moment in it. */
+export function mediaUrl (path: string, seconds?: number): string {
+  const encoded = path.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/')
+  const at = seconds !== undefined && seconds > 0 ? `#t=${Math.floor(seconds)}` : ''
+  return `${MEDIA_PATH}${encoded}${at}`
+}
 
 /**
  * Extra fields on an AG-UI run. `page` is the wiki page the reader is on, so

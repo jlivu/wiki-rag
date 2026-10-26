@@ -1,4 +1,4 @@
-import type { PageContext } from '@shared'
+import { mediaUrl, type PageContext } from '@shared'
 
 export type PanelTheme = 'light' | 'dark'
 
@@ -35,15 +35,26 @@ export function wikiHref (path: string, locale: string | undefined, fallbackLoca
 
 /**
  * The address of a source, including the place the answer came from: the
- * section of a page, or the page of a PDF.
+ * section of a page, the page of a PDF, or the moment in a video.
  *
  * An uploaded file is served from the site root with no locale segment —
- * Wiki.js strips one from an asset URL — so only a page gets one.
+ * Wiki.js strips one from an asset URL — so only a page gets one. A video
+ * is not in the wiki at all: it is served by the AI service from the
+ * media folder, and its "#t=" opens it where the answer came from.
  */
 export function sourceHref (
-  source: { path: string, locale?: string, anchor?: string, kind?: 'page' | 'document' },
+  source: {
+    path: string
+    locale?: string
+    anchor?: string
+    kind?: 'page' | 'document' | 'video'
+    startsAt?: number
+  },
   fallbackLocale: string
 ): string {
+  if (source.kind === 'video') {
+    return mediaUrl(source.path, source.startsAt)
+  }
   const raw = source.anchor?.trim() ?? ''
   const anchor = raw.length === 0 ? '' : (raw.startsWith('#') ? raw : `#${raw}`)
   const path = source.kind === 'document'

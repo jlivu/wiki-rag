@@ -44,6 +44,20 @@ const UNREADABLE_IMAGES: Record<string, string> = {
   '.avif': 'an AVIF image; convert it to JPEG to index it'
 }
 
+/**
+ * Videos do not belong in Wiki.js's database.
+ *
+ * It loads a whole asset into memory the first time it is asked for, so a
+ * recording could not be seeked until it had been cached, and the nightly
+ * dump would carry every video in all fourteen days of backups. They go
+ * in the media folder instead, where they are indexed with timestamps and
+ * served with range requests. See "Videos" in ai/README.md.
+ */
+const VIDEO_EXTENSIONS = [
+  '.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.wmv', '.flv', '.mpg', '.mpeg', '.3gp', '.ogv'
+]
+const VIDEO_REASON = 'a video; put videos in the media folder'
+
 /** Saved by a version of Office old enough that the file is not a zip. */
 const LEGACY: Record<string, string> = {
   '.doc': 'a legacy .doc file; save it as .docx to index it',
@@ -66,6 +80,10 @@ export interface ClassifyInput extends DocumentMeta {
 
 export function classify (input: ClassifyInput): Classification {
   const ext = input.ext.toLowerCase()
+
+  if (VIDEO_EXTENSIONS.includes(ext) || input.mime.toLowerCase().startsWith('video/')) {
+    return { index: false, reason: VIDEO_REASON }
+  }
 
   const unreadable = UNREADABLE_IMAGES[ext]
   if (unreadable) { return { index: false, reason: unreadable } }

@@ -10,11 +10,12 @@
 import type { Pool } from 'pg'
 
 import { documentChunks, findDocumentByPath } from '../index-db/search.js'
+import { readVideoByPath, videoChunks } from '../index-db/store.js'
 import type { Retriever } from '../indexer/retrieval.js'
 import { forgetStaleDocument } from '../indexer/stale.js'
 import { WikiClient, WikiError } from '../wiki/client.js'
 import { createPage } from '../wiki/pages.js'
-import { AI_DRAFT_TAG } from '../../shared/index.js'
+import { AI_DRAFT_TAG, mediaUrl } from '../../shared/index.js'
 import { htmlToMarkdown, trimForContext } from '../wiki/markdown.js'
 
 /** A page body longer than this is cut, with a note saying so. */
@@ -72,7 +73,30 @@ export async function searchWiki (
   return ok({
     query,
     results: found.results.map(item => (
-      item.kind === 'document'
+      item.kind === 'video'
+        ? {
+            kind: 'video',
+            title: item.title,
+            fileName: item.fileName,
+            path: item.path,
+            // Opens the video at the moment that matched.
+            url: `${ctx.publicUrl}${mediaUrl(item.path, item.startsAt)}`,
+            location: item.location,
+            startsAt: Math.floor(item.startsAt),
+            durationSeconds: Math.round(item.durationSeconds),
+            snippet: item.snippet,
+            updatedAt: item.updatedAt,
+            ...(item.linkedFrom.length > 0
+              ? {
+                  linkedFrom: item.linkedFrom.map(page => ({
+                    title: page.title,
+                    url: pageUrl(ctx.publicUrl, page.locale, page.path)
+                  }))
+                }
+              : {}),
+            score: item.score
+          }
+        : item.kind === 'document'
         ? {
             kind: 'document',
             title: item.fileName,
@@ -126,6 +150,38 @@ export async function getDocument (
   if (!ctx.index) { return error('Uploaded files are not indexed here.') }
 
   const path = rawPath.replace(/^\/+/, '').split('#')[0] ?? ''
+
+  // A video is read the same way, by the same tool: the model is told to
+  // use the path search_wiki returned, and a video's path is one of them.
+  const video = await readVideoByPath(ctx.index, path)
+  if (video) {
+    if (!await ctx.wiki.isSignedIn()) {
+      return error('Videos are only readable with a wiki login.')
+    }
+    if (video.status !== 'indexed') {
+      return error(`That video has no searchable text: ${video.reason || video.status}.`)
+    }
+    const parts = await videoChunks(ctx.index, video.id)
+    const transcript = parts
+      .map(part => `## ${part.location}\n\n${stripPrefix(part.text)}`)
+      .join('\n\n')
+    const trimmedVideo = trimForContext(transcript, MAX_PAGE_CHARS)
+    return ok({
+      kind: 'video',
+      title: video.title,
+      fileName: video.fileName,
+      path: video.path,
+      url: `${ctx.publicUrl}${mediaUrl(video.path)}`,
+      durationSeconds: Math.round(video.durationSeconds),
+      words: video.speechSource,
+      updatedAt: video.modifiedAt,
+      truncated: trimmedVideo.truncated,
+      note: 'Each "## m:ss–m:ss" heading is the part of the recording the text below it covers. ' +
+        'Cite a moment by adding "#t=<seconds>" to the url.',
+      content: trimmedVideo.text
+    })
+  }
+
   const document = await findDocumentByPath(ctx.index, path)
   if (!document) {
     return error(`There is no indexed file at "${path}". Use the path exactly as search_wiki returned it.`)

@@ -260,13 +260,17 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
           ...(source.updatedAt ? { updatedAt: source.updatedAt } : {}),
           ...(source.section ? { section: source.section } : {}),
           ...(source.anchor ? { anchor: source.anchor } : {}),
-          ...(source.kind === 'document'
+          ...(source.kind === 'document' || source.kind === 'video'
             ? {
-                kind: 'document' as const,
+                kind: source.kind,
                 fileName: source.fileName || source.title,
                 ...(source.fileType ? { fileType: source.fileType } : {}),
                 ...(source.location ? { location: source.location } : {}),
                 ...(source.origin ? { origin: source.origin } : {}),
+                // A video's link opens the recording at the moment the
+                // answer came from, which is what the panel builds the
+                // "#t=" from.
+                ...(source.kind === 'video' ? { startsAt: source.startsAt } : {}),
                 ...(source.linkedFrom.length > 0
                   ? { linkedFrom: source.linkedFrom.map(page => ({ title: page.title, path: page.path, locale: page.locale })) }
                   : {})

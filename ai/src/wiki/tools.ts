@@ -7,6 +7,7 @@ import type { Pool } from 'pg'
 
 import type { SourceRegistry } from '../agent/sources.js'
 import { documentChunks, findDocumentByPath } from '../index-db/search.js'
+import { readVideoByPath, videoChunks, type IndexedVideo } from '../index-db/store.js'
 import type { Retriever } from '../indexer/retrieval.js'
 import { forgetStaleDocument } from '../indexer/stale.js'
 import type { ToolSpec } from '../providers/types.js'
@@ -35,7 +36,10 @@ export function wikiToolSpecs (defaultLocale: string): ToolSpec[] {
         'from it.',
         'Results also include uploaded files — PDFs, Word documents, spreadsheets, presentations. A file has',
         '"kind": "document" and a "location" saying where in it the match is ("Page 4", \'Sheet "Budget" rows 12-40\');',
-        'read one with get_document, not get_page.'
+        'read one with get_document, not get_page.',
+        'Results also include videos — screen recordings, demonstrations, training sessions. A video has',
+        '"kind": "video" and a "location" giving the minutes the match covers ("12:34-14:02"); its url already',
+        'opens the video at that moment. Read one with get_document. Say which minute a fact came from.'
       ].join(' '),
       inputSchema: {
         type: 'object',
@@ -68,16 +72,17 @@ export function wikiToolSpecs (defaultLocale: string): ToolSpec[] {
     {
       name: GET_DOCUMENT,
       description: [
-        'Read the text of one uploaded file — a PDF, Word document, spreadsheet or presentation — by the path',
-        'search_wiki returned for a result whose "kind" is "document". The text comes back in order, each part',
-        'labelled with where it is in the file ("Page 4", "Section \"Pricing\"", "Slide 7"), so you can say where a',
-        'fact came from. The result carries an "id" such as S1, which is what you cite. Fails if the reader is not',
-        'allowed to open the file.'
+        'Read the text of one uploaded file or one video — a PDF, Word document, spreadsheet, presentation, or a',
+        'recording — by the path search_wiki returned for a result whose "kind" is "document" or "video". The text',
+        'comes back in order, each part labelled with where it is: "Page 4", "Section \"Pricing\"", "Slide 7", or',
+        'the minutes of a recording ("12:34-14:02"), so you can say where a fact came from. For a video each part',
+        'holds what was said and what was on the screen at that time. The result carries an "id" such as S1, which',
+        'is what you cite. Fails if the reader is not allowed to open it.'
       ].join(' '),
       inputSchema: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'File path as search_wiki returned it, e.g. "sops/generator-manual.pdf".' }
+          path: { type: 'string', description: 'File or video path as search_wiki returned it, e.g. "sops/generator-manual.pdf" or "training/quarterly-training.mp4".' }
         },
         required: ['path'],
         additionalProperties: false
@@ -170,6 +175,40 @@ async function search (ctx: ToolContext, input: Record<string, unknown>): Promis
       if (await ctx.retriever.hasContent()) {
         const found = await ctx.retriever.search(query, locale, limit, ctx.client, ctx.token)
         const results = found.results.map(item => {
+          if (item.kind === 'video') {
+            const source = ctx.sources.register({
+              kind: 'video',
+              title: item.title,
+              path: item.path,
+              anchor: item.anchor,
+              section: item.location,
+              location: item.location,
+              startsAt: item.startsAt,
+              fileName: item.fileName,
+              fileType: 'video',
+              snippet: item.snippet,
+              updatedAt: item.updatedAt,
+              linkedFrom: item.linkedFrom
+            })
+            return {
+              id: source.id,
+              kind: 'video',
+              title: item.title,
+              fileName: item.fileName,
+              path: item.path,
+              location: item.location,
+              startsAt: Math.floor(item.startsAt),
+              durationSeconds: Math.round(item.durationSeconds),
+              url: source.url,
+              snippet: item.snippet,
+              updatedAt: item.updatedAt,
+              ...(item.linkedFrom.length > 0
+                ? { linkedFrom: item.linkedFrom.map(page => page.title || page.path) }
+                : {}),
+              score: item.score
+            }
+          }
+
           if (item.kind === 'document') {
             const source = ctx.sources.register({
               kind: 'document',
@@ -338,6 +377,12 @@ async function getDocument (ctx: ToolContext, input: Record<string, unknown>): P
   if (!ctx.index) { return fail('Uploaded files are not indexed here.') }
 
   const path = rawPath.replace(/^\/+/, '').split('#')[0] ?? ''
+
+  // A video is read by the same tool, from the same path search_wiki
+  // returned: the model has one way to read anything that is not a page.
+  const video = await readVideoByPath(ctx.index, path)
+  if (video) { return await getVideo(ctx, video) }
+
   const document = await findDocumentByPath(ctx.index, path)
   if (!document) {
     return fail(`There is no indexed file at "${path}". Use the path exactly as search_wiki returned it.`)
@@ -389,6 +434,63 @@ async function getDocument (ctx: ToolContext, input: Record<string, unknown>): P
       path: document.path,
       fileType: document.docType,
       parts: chunks.length,
+      chars: content.text.length,
+      truncated: content.truncated
+    }
+  }
+}
+
+/**
+ * One video as a transcript, from the index: what was said and what was
+ * on screen, in order, each part headed with the minutes it covers.
+ */
+async function getVideo (ctx: ToolContext, video: IndexedVideo): Promise<ToolOutcome> {
+  if (!ctx.index) { return fail('Videos are not indexed here.') }
+  // The media folder is open to anyone with a wiki login and nobody else,
+  // which is the same rule the /ai/media route applies when it is played.
+  if (!await ctx.client.isSignedIn()) {
+    return fail('Videos are only readable when you are signed in to the wiki.')
+  }
+  if (video.status !== 'indexed') {
+    return fail(`That video has no searchable text: ${video.reason || video.status}.`)
+  }
+
+  const parts = await videoChunks(ctx.index, video.id)
+  const body = parts
+    .map(part => `## ${part.location}\n\n${stripPrefix(part.text)}`)
+    .join('\n\n')
+  const content = trimForContext(body, MAX_PAGE_CHARS)
+
+  const source = ctx.sources.register({
+    kind: 'video',
+    title: video.title,
+    path: video.path,
+    fileName: video.fileName,
+    fileType: 'video',
+    snippet: firstLine(body),
+    updatedAt: video.modifiedAt,
+    read: true
+  })
+
+  return {
+    result: JSON.stringify({
+      id: source.id,
+      kind: 'video',
+      title: video.title,
+      fileName: video.fileName,
+      path: video.path,
+      url: source.url,
+      durationSeconds: Math.round(video.durationSeconds),
+      words: video.speechSource,
+      updatedAt: video.modifiedAt,
+      note: 'Each "## m:ss–m:ss" heading is the part of the recording below it. ' +
+        'Cite the video with its id, and say which minute you are quoting.',
+      content: content.text
+    }),
+    summary: {
+      path: video.path,
+      kind: 'video',
+      parts: parts.length,
       chars: content.text.length,
       truncated: content.truncated
     }

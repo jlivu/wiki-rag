@@ -23,6 +23,8 @@ import {
   listIndexedPages, pagesInWindowWithoutChunks, pagesOutsideWindow, readStats,
   removeDocument, type IndexStats
 } from '../index-db/store.js'
+import { ffmpegAvailable } from '../media/ffmpeg.js'
+import { MediaLibrary } from '../media/library.js'
 import { WikiAdminClient } from '../wiki/admin-client.js'
 
 import { PermissionCache } from '../wiki/permission-cache.js'
@@ -31,9 +33,11 @@ import { createImageDescriber, type ImageDescriber } from '../images/describe.js
 
 import { AssetDirectory } from './asset-directory.js'
 import { runDocumentJob } from './document-job.js'
+import { MediaWatcher, type MediaSweep } from './media-watch.js'
+import { runVideoJob, type VideoProgress } from './video-job.js'
 import { Embedder } from './embeddings.js'
 import { forgetPage } from './forget.js'
-import { runJob } from './job.js'
+import { runJob, type JobOutcome } from './job.js'
 import type { LinkScanOptions } from './links.js'
 import { Retriever } from './retrieval.js'
 
@@ -64,6 +68,9 @@ export interface ReconcileReport {
   emptied: number
   /** Pages queued again because their window has opened. */
   reopened: number
+  /** Videos queued and removed by the media sweep that ran with it. */
+  queuedVideos: number
+  removedVideos: number
 }
 
 /**
@@ -89,6 +96,17 @@ export interface IndexReport {
     note: string[]
   }
   lastReconcile: ReconcileReport | null
+  /** Videos: the folder, what is in it, and what is being read right now. */
+  media: {
+    enabled: boolean
+    reason?: string
+    directory: string
+    /** Videos in the folder, as the last sweep saw it. */
+    files: number
+    /** Being copied in, so not read yet. */
+    settling: number
+    working: (VideoProgress & { seconds: number }) | null
+  }
   inStep: boolean
 }
 
@@ -101,8 +119,16 @@ export class Indexer {
   readonly #retriever: Retriever
   readonly #assets: AssetDirectory
   readonly #describer: ImageDescriber
+  readonly #media: MediaLibrary
   /** Shared with the retriever, so a removal can empty it. */
   readonly #permissions = new PermissionCache()
+
+  #watcher: MediaWatcher | null = null
+  /** Why videos are off, when they are. */
+  #mediaReason: string | undefined = 'the media folder has not been looked at yet'
+  #mediaFiles = 0
+  #mediaSettling = 0
+  #working: VideoProgress | null = null
 
   #ready = false
   #reason: string | undefined
@@ -121,6 +147,7 @@ export class Indexer {
     this.#embedder = new Embedder(config.llm.ollamaUrl, config.index.embedModel)
     this.#assets = new AssetDirectory(this.#wiki)
     this.#describer = createImageDescriber(config)
+    this.#media = new MediaLibrary(config.media.directory)
     this.#retriever = new Retriever(this.#db, this.#embedder, this.#permissions, this.#log)
   }
 
@@ -207,12 +234,59 @@ export class Indexer {
       excluded: this.#config.images.describeExclude
     }, 'image indexing ready')
 
+    await this.#startMedia()
+
     const everyMs = Math.max(1, this.#config.index.reconcileMinutes) * 60_000
     this.#reconcileTimer = setInterval(() => { void this.reconcile('scheduled') }, everyMs)
   }
 
+  /**
+   * Videos, if there are any to have. Three things have to be true: the
+   * folder is mounted, ffmpeg is installed, and there is something to
+   * read the words with. Any of them missing switches videos off with a
+   * reason rather than failing a job five times over.
+   */
+  async #startMedia (): Promise<void> {
+    if (!await this.#media.available()) {
+      this.#mediaReason = `the media folder ${this.#media.root} is not there`
+      this.#log.info({ directory: this.#media.root }, 'videos are off: the media folder is not mounted')
+      return
+    }
+    if (!await ffmpegAvailable()) {
+      this.#mediaReason = 'ffmpeg is not installed in this image'
+      this.#log.warn('videos are off: ffmpeg is not installed')
+      return
+    }
+
+    this.#mediaReason = undefined
+    this.#watcher = new MediaWatcher(this.#media, this.#db, this.#log, {
+      settleSeconds: this.#config.media.settleSeconds,
+      scanSeconds: this.#config.media.scanSeconds,
+      // Including the sweeps it runs itself, so the status is not a
+      // picture of the folder as it was at the last reconciliation.
+      onSweep: sweep => { this.#rememberSweep(sweep) }
+    })
+    await this.#watcher.start()
+    this.#log.info({
+      directory: this.#media.root,
+      scanSeconds: this.#config.media.scanSeconds,
+      chunkSeconds: this.#config.media.chunkSeconds,
+      ocr: this.#config.media.ocr,
+      describe: this.#config.media.describe,
+      speech: this.#config.speech.provider
+    }, 'videos ready')
+    this.#rememberSweep(await this.#watcher.sweep('startup'))
+  }
+
+  #rememberSweep (sweep: MediaSweep): MediaSweep {
+    this.#mediaFiles = sweep.total
+    this.#mediaSettling = sweep.settling
+    return sweep
+  }
+
   async stop (): Promise<void> {
     this.#stopped = true
+    this.#watcher?.stop()
     for (const timer of [this.#workerTimer, this.#startupTimer]) {
       if (timer) { clearTimeout(timer) }
     }
@@ -337,6 +411,11 @@ export class Indexer {
       }
 
       const { emptied, reopened } = await this.#reconcileWindows()
+      // The media folder is swept on its own schedule as well; doing it
+      // here means "Reconcile now" in the wiki covers videos too.
+      const sweep = this.#watcher
+        ? this.#rememberSweep(await this.#watcher.sweep(trigger))
+        : { queued: 0, removed: 0, settling: 0, total: 0 }
       if (removed + removedFiles + emptied > 0) { this.#permissions.clear() }
 
       // A description outlives the file it was written for only if
@@ -358,7 +437,9 @@ export class Indexer {
         queuedFiles,
         removedFiles,
         emptied,
-        reopened
+        reopened,
+        queuedVideos: sweep.queued,
+        removedVideos: sweep.removed
       }
 
       this.#log.info({
@@ -373,11 +454,17 @@ export class Indexer {
         removedFiles,
         ...(emptied > 0 ? { emptied } : {}),
         ...(reopened > 0 ? { reopened } : {}),
+        ...(sweep.total > 0 ? { videos: sweep.total } : {}),
+        ...(sweep.queued > 0 ? { queuedVideos: sweep.queued } : {}),
+        ...(sweep.removed > 0 ? { removedVideos: sweep.removed } : {}),
         ...(requeuedImages > 0 ? { requeuedImages } : {}),
         ...(forgottenDescriptions > 0 ? { forgottenDescriptions } : {}),
         ms: Date.now() - startedAt
       }, 'reconciled')
-      return { queued: queued + queuedFiles, removed: removed + removedFiles }
+      return {
+        queued: queued + queuedFiles + sweep.queued,
+        removed: removed + removedFiles + sweep.removed
+      }
     } catch (err) {
       this.#lastReconcile = {
         at: new Date().toISOString(),
@@ -390,7 +477,9 @@ export class Indexer {
         queuedFiles: 0,
         removedFiles: 0,
         emptied: 0,
-        reopened: 0
+        reopened: 0,
+        queuedVideos: 0,
+        removedVideos: 0
       }
       this.#log.warn({ err, trigger }, 'reconciliation failed')
       return null
@@ -450,6 +539,7 @@ export class Indexer {
     if (!this.enabled) { return { queued: 0 } }
     await this.#db.query('TRUNCATE index_pages CASCADE')
     await this.#db.query('TRUNCATE index_documents CASCADE')
+    await this.#db.query('TRUNCATE index_videos CASCADE')
     const result = await this.reconcile('reindex')
     return { queued: result?.queued ?? 0 }
   }
@@ -500,6 +590,7 @@ export class Indexer {
         wiki: null,
         drift: { ...noDrift(), note: ['the indexer is off: WIKI_API_KEY is not set'] },
         lastReconcile: this.#lastReconcile,
+        media: this.#mediaReport(),
         inStep: false
       }
     }
@@ -551,6 +642,10 @@ export class Indexer {
     if (pagesMissingFromIndex > 0) { note.push(`${pagesMissingFromIndex} page(s) the wiki has that the index does not`) }
     if (filesMissingFromIndex > 0) { note.push(`${filesMissingFromIndex} file(s) the wiki has that the index does not`) }
     if (withoutChunks > 0) { note.push(`${withoutChunks} indexed page(s) with no chunks`) }
+    if (counts.videosWithoutChunks > 0) { note.push(`${counts.videosWithoutChunks} indexed video(s) with no chunks`) }
+    if (this.#working) {
+      note.push(`reading ${this.#working.path} (${this.#working.stage})`)
+    }
     if (hidden > 0) { note.push(`${hidden} page(s) held back by a publish window`) }
     if (queued > 0) { note.push(`${queued} job(s) still queued`) }
     if (this.#lastReconcile && !this.#lastReconcile.ok) { note.push('the last reconciliation failed') }
@@ -573,12 +668,56 @@ export class Indexer {
         note
       },
       lastReconcile: this.#lastReconcile,
+      media: this.#mediaReport(),
       // A queued job and a closed window are both normal, so neither
       // counts against being in step; a difference with the wiki does.
+      // A video still being read is a job in flight, not a difference.
       inStep: this.#ready &&
         pagesMissingFromIndex === 0 && pagesOnlyInIndex === 0 &&
         filesMissingFromIndex === 0 && filesOnlyInIndex === 0 &&
-        withoutChunks === 0
+        withoutChunks === 0 && counts.videosWithoutChunks === 0
+    }
+  }
+
+  /** The media folder's own state, and the video being read right now. */
+  #mediaReport (): IndexReport['media'] {
+    return {
+      enabled: this.#watcher !== null,
+      ...(this.#mediaReason ? { reason: this.#mediaReason } : {}),
+      directory: this.#media.root,
+      files: this.#mediaFiles,
+      settling: this.#mediaSettling,
+      working: this.#working
+        ? { ...this.#working, seconds: Math.round((Date.now() - this.#working.startedAt) / 1000) }
+        : null
+    }
+  }
+
+  /**
+   * One video, with somewhere to report progress from.
+   *
+   * Videos are read one at a time, like everything else in this queue —
+   * ffmpeg and Tesseract would otherwise take the whole Mac while
+   * somebody is trying to use it.
+   */
+  async #runVideo (job: QueuedJob): Promise<JobOutcome> {
+    const startedAt = Date.now()
+    try {
+      return await runVideoJob(this.#db, this.#embedder, job, {
+        media: this.#config.media,
+        library: this.#media,
+        speech: {
+          url: this.#config.speech.url,
+          language: this.#config.speech.language,
+          enabled: this.#config.speech.provider !== 'off'
+        },
+        describer: this.#describer,
+        excludeFolders: this.#config.images.describeExclude,
+        describeDailyLimit: this.#config.images.describeDailyLimit,
+        onProgress: progress => { this.#working = { ...progress, startedAt } }
+      })
+    } finally {
+      this.#working = null
     }
   }
 
@@ -611,9 +750,13 @@ export class Indexer {
 
   async #process (job: QueuedJob): Promise<void> {
     const startedAt = Date.now()
-    const what = job.kind === 'document' ? { documentId: job.entityId } : { pageId: job.entityId }
+    const what = job.kind === 'document'
+      ? { documentId: job.entityId }
+      : job.kind === 'video' ? { videoId: job.entityId, path: job.path } : { pageId: job.entityId }
     try {
-      const outcome = job.kind === 'document'
+      const outcome = job.kind === 'video'
+        ? await this.#runVideo(job)
+        : job.kind === 'document'
         ? await runDocumentJob(this.#db, this.#wiki, this.#embedder, job, {
           maxBytes: this.#config.index.maxDocumentBytes,
           pageExtensions: this.#config.index.pageExtensions,
@@ -630,7 +773,13 @@ export class Indexer {
       // index would hide it from the check that drops it.
       if (outcome.action === 'removed' || outcome.action === 'hidden') { this.#permissions.clear() }
 
-      const message = job.kind === 'document' ? 'indexed a document' : 'indexed a page'
+      const message = job.kind === 'document'
+        ? 'indexed a document'
+        : job.kind === 'video' ? 'indexed a video' : 'indexed a page'
+      if (job.kind === 'video' && outcome.action === 'skipped' && outcome.reason !== 'unchanged') {
+        this.#log.info({ ...what, ms: Date.now() - startedAt, ...outcome }, 'video not indexed')
+        return
+      }
       // A file left out of the index is the one thing an administrator has
       // to be able to find in the log, so say so plainly.
       if (job.kind === 'document' && outcome.action === 'skipped' && outcome.reason !== 'unchanged') {
@@ -659,10 +808,14 @@ function emptyCounts (): Awaited<ReturnType<typeof indexCounts>> {
     pagesWithoutChunks: 0,
     documents: 0,
     skippedDocuments: 0,
+    videos: 0,
+    videosWithoutChunks: 0,
+    skippedVideos: 0,
     chunks: 0,
     imageDescriptions: 0,
     imageTextRows: 0,
-    documentLinks: 0
+    documentLinks: 0,
+    videoLinks: 0
   }
 }
 

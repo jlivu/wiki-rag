@@ -124,6 +124,12 @@ services:
       - "host.docker.internal:host-gateway"
     expose:
       - "4000"
+    volumes:
+      # Videos live on the Mac, not in Wiki.js's database — see "Videos"
+      # in README.md. Read-only: the service indexes them and serves
+      # them at /ai/media/, and never writes here. This folder is NOT in
+      # the database dump; deploy/backup.sh mirrors it separately.
+      - ${MEDIA_HOST_DIR:-${HOME}/Media/wiki}:/media:ro
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }

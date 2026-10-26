@@ -6,12 +6,14 @@
  * pushes its deadline out instead of adding work: rapid changes collapse
  * into one job. Pages and documents are numbered by different Wiki.js
  * tables, so the kind is part of the key: asset 5 and page 5 are not the
- * same job.
+ * same job. A video is numbered by this index rather than by the wiki,
+ * because it lives in a folder on the Mac and the wiki knows nothing
+ * about it.
  */
 import type { Pool } from 'pg'
 
 export type IndexEvent = 'created' | 'updated' | 'deleted' | 'renamed'
-export type IndexKind = 'page' | 'document'
+export type IndexKind = 'page' | 'document' | 'video'
 
 export interface QueuedJob {
   kind: IndexKind

@@ -3,7 +3,7 @@ import { Fragment } from 'react'
 import type { Source, SourcesArgs } from '@shared'
 
 import { NEW_TAB_LINK, NewTabHint } from '../ExternalLink'
-import { ClockIcon, FileIcon, SourcesIcon } from '../Icons'
+import { ClockIcon, FileIcon, SourcesIcon, VideoIcon } from '../Icons'
 import { sourceHref, wikiHref } from '../../lib/params'
 import { Card } from './Card'
 
@@ -13,7 +13,9 @@ import { Card } from './Card'
  *
  * A wiki page is one link. An uploaded file is not: its own link opens the
  * file — at the cited page, for a PDF — and the pages that link to it are
- * links of their own, so that entry is laid out rather than wrapped.
+ * links of their own, so that entry is laid out rather than wrapped. A
+ * video is the same shape as a file, and its link opens the recording at
+ * the minute the answer came from.
  */
 export function SourcesCard ({ args, locale }: {
   args: SourcesArgs
@@ -24,8 +26,8 @@ export function SourcesCard ({ args, locale }: {
       <ol className="src-list">
         {args.items.map((item, index) => (
           <li key={`${item.path}-${index}`}>
-            {item.kind === 'document'
-              ? <DocumentSource item={item} number={index + 1} locale={locale} />
+            {item.kind === 'document' || item.kind === 'video'
+              ? <FileSource item={item} number={index + 1} locale={locale} />
               : <PageSource item={item} number={index + 1} locale={locale} />}
           </li>
         ))}
@@ -53,10 +55,12 @@ function PageSource ({ item, number, locale }: { item: Source, number: number, l
   )
 }
 
-function DocumentSource ({ item, number, locale }: { item: Source, number: number, locale: string }) {
+function FileSource ({ item, number, locale }: { item: Source, number: number, locale: string }) {
   const href = sourceHref(item, locale)
-  const name = item.fileName ?? item.title
-  const where = [fileTypeLabel(item.fileType), item.location ?? item.section]
+  const isVideo = item.kind === 'video'
+  // A video is shown by its title when it has one; a file by its name.
+  const name = isVideo ? (item.title || item.fileName) : (item.fileName ?? item.title)
+  const where = [isVideo ? 'Video' : fileTypeLabel(item.fileType), item.location ?? item.section]
     .filter(part => part && part.length > 0)
     .join(' · ')
   const linked = item.linkedFrom ?? []
@@ -69,7 +73,7 @@ function DocumentSource ({ item, number, locale }: { item: Source, number: numbe
       <span className="src-no" aria-hidden="true">{number}</span>
       <span className="src-body">
         <a className="src-title src-file" href={href} {...NEW_TAB_LINK}>
-          <FileIcon type={item.fileType} />
+          {isVideo ? <VideoIcon /> : <FileIcon type={item.fileType} />}
           {name}
           <NewTabHint />
         </a>

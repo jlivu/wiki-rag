@@ -8,8 +8,10 @@
  * marker that matches nothing is dropped rather than rendered.
  */
 
-/** A page, or an uploaded file. */
-export type SourceKind = 'page' | 'document'
+import { mediaUrl } from '../../shared/index.js'
+
+/** A page, an uploaded file, or a video in the media folder. */
+export type SourceKind = 'page' | 'document' | 'video'
 
 export interface LinkingPageRef {
   title: string
@@ -39,10 +41,12 @@ export interface RunSource {
   fileName: string
   /** pdf, docx, xlsx, pptx, csv — what the panel draws an icon from. */
   fileType: string
-  /** Where in the file: "Page 4", "Sheet \"Budget\" rows 12–40". */
+  /** Where in the file: "Page 4", "Sheet \"Budget\" rows 12–40", "12:34–14:02". */
   location: string
   /** For an image: 'ocr', 'alt' or 'description'. */
   origin: string
+  /** Videos: seconds from the start, which the link opens at. */
+  startsAt: number
   /** The pages that link to the file, as far as this reader may see. */
   linkedFrom: LinkingPageRef[]
 }
@@ -61,6 +65,7 @@ export interface SourceInput {
   fileType?: string
   location?: string
   origin?: string
+  startsAt?: number
   linkedFrom?: LinkingPageRef[]
 }
 
@@ -86,7 +91,7 @@ export class SourceRegistry {
   register (input: SourceInput): RunSource {
     const kind = input.kind ?? 'page'
     const path = input.path.replace(/^\/+/, '')
-    const locale = kind === 'document' ? '' : (input.locale ?? '')
+    const locale = kind === 'page' ? (input.locale ?? '') : ''
     const key = `${kind}\n${locale}\n${path}`
     const existing = this.#byPage.get(key)
 
@@ -97,6 +102,7 @@ export class SourceRegistry {
       if (!existing.updatedAt && input.updatedAt) { existing.updatedAt = input.updatedAt }
       if (!existing.location && input.location) { existing.location = input.location }
       if (!existing.origin && input.origin) { existing.origin = input.origin }
+      if (!existing.startsAt && input.startsAt) { existing.startsAt = input.startsAt }
       if (existing.linkedFrom.length === 0 && input.linkedFrom) { existing.linkedFrom = input.linkedFrom }
       if (input.read && !existing.read) {
         existing.read = true
@@ -122,6 +128,7 @@ export class SourceRegistry {
       fileType: input.fileType ?? '',
       location: input.location ?? '',
       origin: input.origin ?? '',
+      startsAt: input.startsAt ?? 0,
       linkedFrom: input.linkedFrom ?? []
     }
     source.url = this.#url(source)
@@ -160,6 +167,11 @@ export class SourceRegistry {
   }
 
   #url (source: RunSource): string {
+    // A video is not in the wiki at all: it is served by this service
+    // from the media folder, and the anchor is a moment in it.
+    if (source.kind === 'video') {
+      return `${this.#publicUrl}${mediaUrl(source.path, source.startsAt)}`
+    }
     // An uploaded file sits at the site root with no locale segment: the
     // catch-all route strips one, so adding it would be wrong by luck.
     return source.kind === 'document'

@@ -18,8 +18,8 @@ const RRF_K = 60
 
 export interface ChunkHit {
   chunkId: number
-  kind: 'page' | 'document'
-  /** The page id or the document id, by kind. */
+  kind: 'page' | 'document' | 'video'
+  /** The page, document or video id, by kind. */
   ownerId: number
   ordinal: number
   headingPath: string
@@ -39,11 +39,15 @@ export interface ChunkHit {
   /** Empty for a document: files are not localised. */
   locale: string
   updatedAt: string
-  /** Documents only. */
+  /** Documents and videos. */
   fileName: string
   docType: string
   mime: string
   fileSize: number
+  /** Videos: seconds from the start, for the "#t=" link. */
+  startsAt: number | null
+  endsAt: number | null
+  durationSeconds: number
 }
 
 /**
@@ -54,19 +58,25 @@ const OWNER_SQL = `
   owner AS (
     SELECT
       c.id AS chunk_id,
-      CASE WHEN c.page_id IS NULL THEN 'document' ELSE 'page' END AS kind,
-      coalesce(p.id, d.id)                     AS owner_id,
-      coalesce(p.title, d.file_name, '')       AS title,
-      coalesce(p.path, d.path, '')             AS path,
-      coalesce(p.locale, '')                   AS locale,
-      coalesce(p.updated_at, d.updated_at)     AS updated_at,
-      coalesce(d.file_name, '')                AS file_name,
-      coalesce(d.doc_type, '')                 AS doc_type,
-      coalesce(d.mime, '')                     AS mime,
-      coalesce(d.file_size, 0)                 AS file_size
+      CASE
+        WHEN c.page_id     IS NOT NULL THEN 'page'
+        WHEN c.document_id IS NOT NULL THEN 'document'
+        ELSE 'video'
+      END AS kind,
+      coalesce(p.id, d.id, v.id)                   AS owner_id,
+      coalesce(p.title, d.file_name, v.title, '')  AS title,
+      coalesce(p.path, d.path, v.path, '')         AS path,
+      coalesce(p.locale, '')                       AS locale,
+      coalesce(p.updated_at, d.updated_at, v.modified_at) AS updated_at,
+      coalesce(d.file_name, v.file_name, '')       AS file_name,
+      coalesce(d.doc_type, '')                     AS doc_type,
+      coalesce(d.mime, '')                         AS mime,
+      coalesce(d.file_size, v.file_size, 0)        AS file_size,
+      coalesce(v.duration, 0)                      AS duration
     FROM index_chunks c
     LEFT JOIN index_pages p     ON p.id = c.page_id
     LEFT JOIN index_documents d ON d.id = c.document_id
+    LEFT JOIN index_videos v    ON v.id = c.video_id
     -- A page inside its publish window only. The window closes without an
     -- event, so the index can be a day stale; filtering here makes it take
     -- effect the moment it closes, whatever the indexer has caught up with.
@@ -85,7 +95,9 @@ const HYBRID_SQL = `
       FROM index_chunks c
       JOIN owner o ON o.chunk_id = c.id
       WHERE c.embedding IS NOT NULL
-        AND ($2::text IS NULL OR o.kind = 'document' OR o.locale = $2::text)
+        -- Only pages are localised; a file or a video has no locale, so
+        -- narrowing to one must not hide them.
+        AND ($2::text IS NULL OR o.kind <> 'page' OR o.locale = $2::text)
       ORDER BY c.embedding <=> $1::vector
       LIMIT $4
     ) nearest
@@ -101,7 +113,9 @@ const HYBRID_SQL = `
       JOIN owner o ON o.chunk_id = c.id
       CROSS JOIN tsq
       WHERE c.fts @@ tsq.query
-        AND ($2::text IS NULL OR o.kind = 'document' OR o.locale = $2::text)
+        -- Only pages are localised; a file or a video has no locale, so
+        -- narrowing to one must not hide them.
+        AND ($2::text IS NULL OR o.kind <> 'page' OR o.locale = $2::text)
       ORDER BY ts_rank_cd(c.fts, tsq.query) DESC
       LIMIT $4
     ) matched
@@ -121,9 +135,10 @@ const HYBRID_SQL = `
   )
   SELECT
     c.id, c.ordinal, c.heading_path, c.anchor, c.location, c.origin, c.text,
+    c.starts_at, c.ends_at,
     f.score::float8 AS score, f.vector_rank, f.text_rank,
     o.kind, o.owner_id, o.title, o.path, o.locale, o.updated_at,
-    o.file_name, o.doc_type, o.mime, o.file_size
+    o.file_name, o.doc_type, o.mime, o.file_size, o.duration
   FROM fused f
   JOIN index_chunks c ON c.id = f.chunk_id
   JOIN owner o ON o.chunk_id = c.id
@@ -138,11 +153,12 @@ export async function searchChunks (
   perList: number
 ): Promise<ChunkHit[]> {
   const { rows } = await db.query<{
-    id: number, kind: 'page' | 'document', owner_id: number, ordinal: number,
+    id: number, kind: 'page' | 'document' | 'video', owner_id: number, ordinal: number,
     heading_path: string, anchor: string, location: string, origin: string, text: string,
+    starts_at: string | null, ends_at: string | null,
     score: number, vector_rank: number | null, text_rank: number | null,
     title: string, path: string, locale: string, updated_at: Date,
-    file_name: string, doc_type: string, mime: string, file_size: string
+    file_name: string, doc_type: string, mime: string, file_size: string, duration: string
   }>(HYBRID_SQL, [queryEmbedding, locale, query, perList, RRF_K])
 
   return rows.map(row => ({
@@ -165,7 +181,10 @@ export async function searchChunks (
     fileName: row.file_name,
     docType: row.doc_type,
     mime: row.mime,
-    fileSize: Number(row.file_size)
+    fileSize: Number(row.file_size),
+    startsAt: row.starts_at === null ? null : Number(row.starts_at),
+    endsAt: row.ends_at === null ? null : Number(row.ends_at),
+    durationSeconds: Number(row.duration ?? 0)
   }))
 }
 
