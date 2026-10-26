@@ -86,6 +86,21 @@ All one-off, in the wiki's admin area at http://127.0.0.1:3080/a.
    (`/ai/panel` works too — the proxy rewrites it, and the service redirects
    it, both keeping the query string.)
 
+   **Optional, beside it:** what the panel calls itself. It defaults to
+   *Assistant*, and the name is used in the panel's header, as the iframe's
+   accessible name, and in the launcher and close buttons.
+
+   ```html
+   <script>
+     window.WIKI_AI_PANEL_URL = '/ai/panel/'
+     window.WIKI_AI_PANEL_TITLE = 'iFMIS Helper'
+   </script>
+   ```
+
+   It is taken as written — no capitalisation is applied, so a name like
+   *iFMIS Helper* stays that way — and anything longer than 40 characters is
+   cut, because the header row is 400px wide.
+
 2. **Admin > General > Site URL** — `http://127.0.0.1:3080`, so the wiki builds
    its links for the proxy rather than for port 3002.
 

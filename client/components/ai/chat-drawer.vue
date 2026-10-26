@@ -13,7 +13,7 @@
         header.ai-chat-panel-header
           .ai-chat-panel-title
             v-icon(size='17', color='primary') mdi-creation
-            span Assistant
+            span {{panelTitle}}
           .ai-chat-panel-status(:class='{ "is-online": status.online }')
             span.ai-chat-panel-status-dot
             span {{status.label}}
@@ -33,8 +33,8 @@
               ref='closeBtn'
               type='button'
               @click='closePanel'
-              aria-label='Close assistant'
-              title='Close assistant panel'
+              :aria-label='`Close ${panelTitle}`'
+              :title='`Close the ${panelTitle} panel`'
               )
               svg(width='15', height='15', viewBox='0 0 16 16', fill='none', stroke='currentColor', stroke-width='1.6', aria-hidden='true')
                 rect(x='1', y='2', width='14', height='12', rx='2')
@@ -45,7 +45,7 @@
             v-if='panelUrl && hasOpened'
             ref='frame'
             :src='frameSrc'
-            title='Assistant'
+            :title='panelTitle'
             allow='clipboard-write; microphone'
             )
           .ai-chat-panel-empty(v-else-if='!panelUrl')
@@ -67,7 +67,7 @@
         height='50'
         @click='openPanel'
         :aria-label='launcherLabel'
-        title='Open assistant'
+        :title='launcherLabel'
         )
         svg(width='20', height='20', viewBox='0 0 20 20', fill='none', stroke='currentColor', stroke-width='1.6', aria-hidden='true')
           path(d='M18 2H2a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h4l4 4 4-4h4a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1z')
@@ -107,6 +107,14 @@ export default {
       const url = window.WIKI_AI_PANEL_URL
       return (typeof url === 'string') ? url.trim() : ''
     },
+    // What the panel calls itself, in its header and as the iframe's
+    // accessible name. Set window.WIKI_AI_PANEL_TITLE beside the URL in
+    // Admin > Theme > Head HTML Injection to change it.
+    panelTitle () {
+      const title = window.WIKI_AI_PANEL_TITLE
+      const trimmed = (typeof title === 'string') ? title.trim() : ''
+      return trimmed.length > 0 ? trimmed.slice(0, 40) : 'Assistant'
+    },
     panelOrigin () {
       try {
         return new URL(this.panelUrl, window.location.href).origin
@@ -131,7 +139,9 @@ export default {
       return this.panelOpen && this.$vuetify.breakpoint.width >= DOCK_BREAKPOINT
     },
     launcherLabel () {
-      return this.unreadCount > 0 ? `Open assistant (${this.unreadCount} unread)` : 'Open assistant'
+      // The title is used as written: lowercasing it would mangle a name.
+      const open = `Open ${this.panelTitle}`
+      return this.unreadCount > 0 ? `${open} (${this.unreadCount} unread)` : open
     },
     canStartNewChat () {
       return Boolean(this.panelUrl && this.hasOpened)

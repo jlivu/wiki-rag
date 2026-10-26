@@ -26,6 +26,7 @@ Project memory for Claude Code. Keep it short and factual, and update it when a 
   - Dimensions follow the Landger design: 400px panel, 64px header row aligned with the Wiki.js header, 50px launcher with 14px corners at bottom right. Colours follow the Wiki.js theme, in light and dark mode.
   - Docks beside the page from 960px wide, slides over it below that, full width on phones. The open state persists per browser tab (sessionStorage).
   - Loads the chat app in an iframe from `window.WIKI_AI_PANEL_URL` (set in Admin > Theme > Head HTML Injection), passing query parameters `path`, `locale`, `title` and `theme`. Shows a placeholder when it is unset.
+  - What the panel calls itself comes from `window.WIKI_AI_PANEL_TITLE`, set beside the URL in the same injection, defaulting to **Assistant**. It is used in the header, as the iframe's accessible name, and in the launcher and close labels, taken verbatim (no lowercasing, so *iFMIS Helper* survives) and cut at 40 characters.
   - Header buttons, both 32px with 8px corners: **New chat** and **Close**.
   - Messages the chat app may post to the parent window (same origin only; the panel checks origin and source):
     - `{ type: 'wiki-ai:status', label, online }` updates the header status chip
@@ -162,6 +163,13 @@ Project memory for Claude Code. Keep it short and factual, and update it when a 
 - Hot reload cannot swap store modules. After changing anything under `client/store/`, do a full reload (Cmd+Shift+R).
 - **`[MASTER] warn: Unable to acquire a connection`, once a minute, is harmless dev noise.** `server/master.js` builds a `connect-session-knex` store, which schedules a session cleanup every 60s and reschedules itself in a `.finally()`, so nothing can stop the chain. Editing anything under `server/` makes `dev/index.js` hot-restart: it calls `WIKI.kernel.shutdown(true)`, which runs `knex.destroy()` (the client sets `pool = undefined`), then re-requires the server *in the same process*. The old store's timer is never cleared, so every 60s it hits the dead client, knex throws, and with no `.catch()` it lands in the `unhandledRejection` handler at `server/core/kernel.js:97`. One orphan per hot restart; the live store still works (the `sessions` table stays pruned). **Workaround: restart the dev server when the log gets noisy** — decided 2026-10-26, no code fix, since `stopDbCleanup()` keys off a static shared handle and would not reach the orphan anyway. **Production is unaffected**: it runs `node server` (`server/index.js`), never `dev/index.js`, and `shutdown()` there ends in `process.exit(0)`.
 - Production image: `docker build -f dev/build/Dockerfile -t <tag> .` (use `docker buildx build --platform linux/amd64` for an x86 server). The source reports version 2.0.0 because official builds stamp the real version; handle this when building the production image.
+
+## Branding
+
+- The wiki is branded **GoV iFMIS KB** with the Vanuatu coat of arms.
+- `client/static/favicon.ico` and everything in `client/static/favicons/` are regenerated from the crest (`coat-of-arms.png` in the wiki's assets), at upstream's own sizes and formats: ICO with 48/32/16 at 32bpp BMP, PNGs at 16, 32, 180 (apple-touch, flattened onto white because iOS renders transparency black), 192, 256 and 270 (the file called `mstile-150x150.png` is 270px — that is the tile convention), all 8-bit colormap as upstream's are, and `safari-pinned-tab.svg` as a traced monochrome silhouette. `client/static/manifest.json` carries the name. The generator is not kept: the icons are the artefact, and the crest is in the wiki.
+- At 16px a detailed crest is unavoidably a smudge; 32px up is clear. A simplified mark for the two smallest sizes is the only way to improve that, and would no longer be the coat of arms.
+- **These are upstream files**, the only ones this fork rewrites wholesale rather than adds to. A rebase onto v2.5.317 will show them as conflicts — take ours.
 
 ## Conventions
 
