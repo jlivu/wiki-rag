@@ -100,6 +100,16 @@ pre,
 
 /* ─── layout ─────────────────────────────────────────────────────── */
 
+/*
+ * The panel is 600px by default and the reader can drag it wider still,
+ * so the conversation keeps a reading measure of its own and sits in the
+ * middle of whatever room it is given. Below this width nothing is
+ * capped, which is every panel up to the default.
+ */
+:root {
+  --measure: 620px;
+}
+
 .panel {
   display: flex;
   flex-direction: column;
@@ -116,6 +126,12 @@ pre,
   overflow-y: auto;
   scroll-behavior: smooth;
   overscroll-behavior: contain;
+}
+
+.chat-feed > .msg {
+  width: 100%;
+  max-width: var(--measure);
+  margin: 0 auto;
 }
 
 /* ─── messages ───────────────────────────────────────────────────── */
@@ -608,6 +624,19 @@ pre,
   border-collapse: collapse;
 }
 
+/*
+ * A bubble breaks anywhere so a long path cannot widen the panel, but in
+ * a table that also makes the narrowest possible column the one the
+ * browser plans for: "9002" came out as "900" over "2". Cells break only
+ * when a word genuinely does not fit on a line of its own.
+ */
+.aic-tbl th,
+.aic-tbl td,
+.md th,
+.md td {
+  overflow-wrap: break-word;
+}
+
 .aic-tbl th {
   padding: 7px 12px;
   border-bottom: 1px solid var(--border);
@@ -752,6 +781,11 @@ pre,
   display: flex;
   align-items: flex-end;
   gap: 7px;
+  width: 100%;
+  /* The measure plus the padding on either side, so the message box is
+     exactly as wide as the answers above it. */
+  max-width: calc(var(--measure) + 26px);
+  margin: 0 auto;
   padding: 11px 13px;
   border-top: 1px solid var(--border);
   background-color: var(--bg);
@@ -978,6 +1012,15 @@ pre,
   padding: 0 13px 9px;
   font-size: 11.5px;
   line-height: 1.5;
+}
+
+/* Everything under the message box keeps the box's own width. */
+.composer-status,
+.composer-error,
+.composer-foot {
+  width: 100%;
+  max-width: calc(var(--measure) + 26px);
+  margin-inline: auto;
 }
 
 .composer-status { color: var(--text-2); }

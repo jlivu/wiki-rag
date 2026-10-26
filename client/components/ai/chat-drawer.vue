@@ -9,6 +9,25 @@
       disable-resize-watcher
       touchless
       )
+      .ai-chat-panel-resizer(
+        v-if='canResize'
+        role='separator'
+        aria-orientation='vertical'
+        tabindex='0'
+        :aria-label='`Resize the ${panelTitle} panel`'
+        :aria-valuenow='panelWidth'
+        :aria-valuemin='minWidth'
+        :aria-valuemax='maxWidth'
+        :aria-valuetext='`${panelWidth} pixels wide`'
+        title='Drag or use the arrow keys to resize. Double-click or press Enter to reset.'
+        @pointerdown='onResizeStart'
+        @pointermove='onResizeMove'
+        @pointerup='onResizeEnd'
+        @pointercancel='onResizeEnd'
+        @lostpointercapture='onResizeEnd'
+        @dblclick='resetWidth'
+        @keydown='onResizeKey'
+        )
       .ai-chat-panel-layout
         header.ai-chat-panel-header
           .ai-chat-panel-title
@@ -79,16 +98,52 @@ import { get, sync } from 'vuex-pathify'
 
 import aiStore from '@/store/ai'
 
-// The panel docks beside the page from this window width up,
-// and slides over the page on narrower screens.
-const DOCK_BREAKPOINT = 960
-const PANEL_WIDTH = 400 // keep in sync with $ai-panel-width in the styles
+const PANEL_WIDTH = 600 // the default, and what a reset goes back to
+const MIN_PANEL_WIDTH = 400
+// The panel docks beside the page only while the page still has this much
+// room left: what it has today on a 1512px screen beside the old 400px
+// panel. With the default width that puts the breakpoint at 1712px, so a
+// 1728px window docks and a 1512px one slides the panel over the page.
+const PAGE_MIN_WIDTH = 1112
+// Measured against the default width, not the one the reader dragged to:
+// a drag is a deliberate choice to give the page less room, and a panel
+// that changed mode under the pointer — dimming the page and closing on
+// the next click — would be a nasty surprise 16px into a drag.
+const DOCK_BREAKPOINT = PAGE_MIN_WIDTH + PANEL_WIDTH
+// Remembered for this browser, not just this tab: it is a preference,
+// unlike the open state, which is per tab.
+const WIDTH_KEY = 'wiki-ai-panel-width'
+const KEY_STEP = 16
+const KEY_STEP_LARGE = 64
+
+function clampWidth (value, max) {
+  return Math.min(Math.max(Math.round(value), MIN_PANEL_WIDTH), Math.max(MIN_PANEL_WIDTH, max))
+}
+
+function readStoredWidth () {
+  try {
+    const stored = parseInt(window.localStorage.getItem(WIDTH_KEY), 10)
+    return Number.isFinite(stored) ? stored : PANEL_WIDTH
+  } catch (err) {
+    return PANEL_WIDTH
+  }
+}
+
+function writeStoredWidth (width) {
+  try {
+    window.localStorage.setItem(WIDTH_KEY, String(width))
+  } catch (err) {
+    // Storage can be unavailable (e.g. private mode); the panel still works
+  }
+}
 
 export default {
   data () {
     return {
       hasOpened: false,
-      dockBreakpoint: DOCK_BREAKPOINT,
+      // The width the reader asked for, before this window's limit.
+      storedWidth: readStoredWidth(),
+      dragging: false,
       status: {
         label: 'Not connected',
         online: false
@@ -132,8 +187,29 @@ export default {
       const separator = this.panelUrl.indexOf('?') >= 0 ? '&' : '?'
       return `${this.panelUrl}${separator}${params.toString()}`
     },
+    minWidth () {
+      return MIN_PANEL_WIDTH
+    },
+    // Never more than half the window, whatever was asked for.
+    maxWidth () {
+      return Math.max(MIN_PANEL_WIDTH, Math.floor(this.$vuetify.breakpoint.width / 2))
+    },
+    // The width in use. The preference itself is kept whole, so widening
+    // the window gives back a width a narrow one had to clamp.
+    panelWidth () {
+      return clampWidth(this.storedWidth, this.maxWidth)
+    },
     drawerWidth () {
-      return this.$vuetify.breakpoint.xsOnly ? '100%' : PANEL_WIDTH
+      return this.$vuetify.breakpoint.xsOnly ? '100%' : this.panelWidth
+    },
+    // Phones get the full width, so there is nothing to drag.
+    canResize () {
+      return !this.$vuetify.breakpoint.xsOnly
+    },
+    // Vuetify slides the drawer over the page below this width, which is
+    // what the panel should do when the page no longer fits beside it.
+    dockBreakpoint () {
+      return DOCK_BREAKPOINT
     },
     isDocked () {
       return this.panelOpen && this.$vuetify.breakpoint.width >= DOCK_BREAKPOINT
@@ -162,6 +238,12 @@ export default {
     },
     isDocked () {
       this.updateBodyClasses()
+    },
+    panelWidth: {
+      immediate: true,
+      handler (width) {
+        this.publishWidth(width)
+      }
     }
   },
   beforeCreate () {
@@ -171,6 +253,13 @@ export default {
       this.$store.registerModule('ai', aiStore)
     }
   },
+  created () {
+    // Drag bookkeeping: deliberately not reactive, it changes every frame.
+    this.resizeFrame = 0
+    this.pointerX = 0
+    this.dragFromX = 0
+    this.dragFromWidth = PANEL_WIDTH
+  },
   mounted () {
     window.addEventListener('message', this.onFrameMessage)
     document.addEventListener('keydown', this.onKeydown)
@@ -178,7 +267,11 @@ export default {
   beforeDestroy () {
     window.removeEventListener('message', this.onFrameMessage)
     document.removeEventListener('keydown', this.onKeydown)
-    document.body.classList.remove('ai-panel-docked', 'ai-launcher-shown')
+    if (this.resizeFrame) {
+      window.cancelAnimationFrame(this.resizeFrame)
+    }
+    document.body.classList.remove('ai-panel-docked', 'ai-launcher-shown', 'ai-panel-resizing')
+    document.body.style.removeProperty('--ai-panel-width')
   },
   methods: {
     openPanel () {
@@ -210,7 +303,95 @@ export default {
       document.body.classList.toggle('ai-panel-docked', this.isDocked)
       document.body.classList.toggle('ai-launcher-shown', !this.panelOpen)
     },
+    // The styles need the live width too, for the floating edit button.
+    publishWidth (width) {
+      if (typeof document !== 'undefined' && document.body) {
+        document.body.style.setProperty('--ai-panel-width', `${width}px`)
+      }
+    },
+    setWidth (width, remember) {
+      this.storedWidth = clampWidth(width, this.maxWidth)
+      if (remember) {
+        writeStoredWidth(this.storedWidth)
+      }
+    },
+    // Dragging the edge. The pointer is captured, so the drag survives
+    // crossing the iframe, which would otherwise swallow the events.
+    onResizeStart (ev) {
+      if (ev.pointerType === 'mouse' && ev.button !== 0) {
+        return
+      }
+      this.dragging = true
+      this.dragFromX = ev.clientX
+      this.dragFromWidth = this.panelWidth
+      document.body.classList.add('ai-panel-resizing')
+      try {
+        ev.currentTarget.setPointerCapture(ev.pointerId)
+      } catch (err) {
+        // Without capture the drag still works over the page itself
+      }
+      ev.preventDefault()
+    },
+    onResizeMove (ev) {
+      if (!this.dragging) {
+        return
+      }
+      this.pointerX = ev.clientX
+      if (this.resizeFrame) {
+        return
+      }
+      // One update per frame: each one re-lays out the whole page.
+      this.resizeFrame = window.requestAnimationFrame(() => {
+        this.resizeFrame = 0
+        if (!this.dragging) {
+          return
+        }
+        // The panel sits on the right (on the left in RTL), so moving the
+        // edge towards the page widens it.
+        const moved = this.$vuetify.rtl ?
+          this.pointerX - this.dragFromX :
+          this.dragFromX - this.pointerX
+        this.setWidth(this.dragFromWidth + moved, false)
+      })
+    },
+    onResizeEnd () {
+      if (!this.dragging) {
+        return
+      }
+      this.dragging = false
+      if (this.resizeFrame) {
+        window.cancelAnimationFrame(this.resizeFrame)
+        this.resizeFrame = 0
+      }
+      document.body.classList.remove('ai-panel-resizing')
+      writeStoredWidth(this.panelWidth)
+    },
+    resetWidth () {
+      this.setWidth(PANEL_WIDTH, true)
+    },
+    onResizeKey (ev) {
+      const step = ev.shiftKey ? KEY_STEP_LARGE : KEY_STEP
+      const wider = this.$vuetify.rtl ? 'ArrowRight' : 'ArrowLeft'
+      const narrower = this.$vuetify.rtl ? 'ArrowLeft' : 'ArrowRight'
+      let next = null
+      switch (ev.key) {
+        case wider: next = this.panelWidth + step; break
+        case narrower: next = this.panelWidth - step; break
+        case 'Home': next = MIN_PANEL_WIDTH; break
+        case 'End': next = this.maxWidth; break
+        case 'Enter': case ' ': next = PANEL_WIDTH; break
+        default: return
+      }
+      ev.preventDefault()
+      this.setWidth(next, true)
+    },
     onKeydown (ev) {
+      // Escape during a drag puts the width back rather than closing.
+      if (ev.key === 'Escape' && this.dragging) {
+        this.setWidth(this.dragFromWidth, false)
+        this.onResizeEnd()
+        return
+      }
       if (ev.key === 'Escape' && this.panelOpen && this.$el.contains(document.activeElement)) {
         this.closePanel()
       }
@@ -250,7 +431,8 @@ export default {
 // Colours follow the Wiki.js theme (light and dark mode).
 // Dimensions and spacing follow the assistant design.
 
-$ai-panel-width: 400px; // keep in sync with PANEL_WIDTH in the script
+$ai-panel-width: 600px; // the default; the live width is --ai-panel-width
+$ai-resizer-hit: 9px;
 $ai-header-height: 64px; // lines up with the Wiki.js header
 $ai-launcher-size: 50px;
 $ai-launcher-bottom: 22px;
@@ -276,6 +458,57 @@ $ai-header-border: rgba(255, 255, 255, 0.12);
     display: flex;
     flex-direction: column;
     height: 100%;
+  }
+
+  // The draggable edge. It is only as wide as a comfortable target; the
+  // line that shows where it is appears on hover, focus and while dragging.
+  &-resizer {
+    position: absolute;
+    top: 0;
+    left: 0;
+    z-index: 3;
+    width: $ai-resizer-hit;
+    height: 100%;
+    cursor: col-resize;
+    // So a touch drag resizes instead of scrolling the page behind it.
+    touch-action: none;
+
+    &::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      width: 3px;
+      background-color: transparent;
+      transition: background-color 0.12s;
+    }
+
+    &:hover::before,
+    &:focus-visible::before {
+      background-color: mc('blue', '400');
+    }
+
+    &:focus-visible {
+      // The line along the edge is the focus indicator: an outline on a
+      // 9px strip would be drawn mostly outside the panel.
+      outline: none;
+
+      &::before {
+        background-color: mc('blue', '300');
+        box-shadow: 0 0 0 1px mc('blue', '300');
+      }
+    }
+
+    .v-application--is-rtl & {
+      left: auto;
+      right: 0;
+
+      &::before {
+        left: auto;
+        right: 0;
+      }
+    }
   }
 
   &-header {
@@ -493,14 +726,35 @@ body.ai-launcher-shown {
   }
 }
 
-// Keep the edit button clear of the docked panel
+// Keep the edit button clear of the docked panel, at whatever width the
+// reader has dragged it to (the component keeps --ai-panel-width in step).
 body.ai-panel-docked {
   .v-application--is-ltr .v-speed-dial--fixed.v-speed-dial--right {
-    right: $ai-panel-width + 16px;
+    right: calc(var(--ai-panel-width, #{$ai-panel-width}) + 16px);
   }
 
   .v-application--is-rtl .v-speed-dial--fixed.v-speed-dial--left {
-    left: $ai-panel-width + 16px;
+    left: calc(var(--ai-panel-width, #{$ai-panel-width}) + 16px);
+  }
+}
+
+// While the edge is being dragged: no width animation to lag behind the
+// pointer, no text selection, and the iframe must not swallow the drag.
+body.ai-panel-resizing {
+  cursor: col-resize;
+  user-select: none;
+
+  .ai-chat-panel.v-navigation-drawer,
+  .v-main {
+    transition: none !important;
+  }
+
+  .ai-chat-panel-frame {
+    pointer-events: none;
+  }
+
+  .ai-chat-panel-resizer::before {
+    background-color: mc('blue', '400');
   }
 }
 
