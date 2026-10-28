@@ -88,8 +88,26 @@
         :aria-label='launcherLabel'
         :title='launcherLabel'
         )
-        svg(width='20', height='20', viewBox='0 0 20 20', fill='none', stroke='currentColor', stroke-width='1.6', aria-hidden='true')
-          path(d='M18 2H2a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h4l4 4 4-4h4a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1z')
+        //- A chat bubble with the panel header's sparkle in front of its
+          top-right corner. The mask cuts the sparkle's outline out of
+          the bubble, so the two whites never merge and the gap is the
+          launcher's own blue whatever the theme makes that.
+        svg(width='24', height='24', viewBox='0 0 24 24', fill='none', aria-hidden='true', focusable='false')
+          mask#ai-launcher-spark-gap(maskUnits='userSpaceOnUse', x='0', y='0', width='24', height='24')
+            rect(width='24', height='24', fill='#fff')
+            g(transform='translate(13.82 1.76) scale(0.42)')
+              path(:d='sparklePath', fill='#000', stroke='#000', stroke-width='2.9', stroke-linejoin='round')
+          path(
+            d='M3.3 5.5H13.1a2.2 2.2 0 0 1 2.2 2.2v7.4a2.2 2.2 0 0 1-2.2 2.2h-1.8l-3.15 3.5L5 17.3H3.3a2.2 2.2 0 0 1-2.2-2.2V7.7a2.2 2.2 0 0 1 2.2-2.2z'
+            mask='url(#ai-launcher-spark-gap)'
+            stroke='currentColor'
+            stroke-width='1.8'
+            stroke-linecap='round'
+            stroke-linejoin='round'
+            )
+          g(transform='translate(13.82 1.76) scale(0.42)')
+            g.ai-chat-launcher-spark
+              path(:d='sparklePath', fill='currentColor')
       span.ai-chat-launcher-badge(v-if='unreadCount > 0', aria-hidden='true') {{unreadCount > 99 ? '99+' : unreadCount}}
 </template>
 
@@ -115,6 +133,12 @@ const DOCK_BREAKPOINT = PAGE_MIN_WIDTH + PANEL_WIDTH
 const WIDTH_KEY = 'wiki-ai-panel-width'
 const KEY_STEP = 16
 const KEY_STEP_LARGE = 64
+
+// Material Design Icons' `creation` — the three sparkles the panel header
+// shows beside the title, as a path so the launcher can draw it inside its
+// own SVG. Taken from the glyph Wiki.js already ships (@mdi/font, U+F0674),
+// scaled from the font's 512 em square to a 24x24 box.
+const SPARKLE_PATH = 'M18.984 0.984 17.719 3.75 15 5.016 17.719 6.281 18.984 9 20.25 6.281 23.016 5.016 20.25 3.75ZM9 3.984 6.516 9.516 0.984 12 6.516 14.484 9 20.016 11.484 14.484 17.016 12 11.484 9.516ZM18.984 15 17.719 17.719 15 18.984 17.719 20.25 18.984 23.016 20.25 20.25 23.016 18.984 20.25 17.719Z'
 
 function clampWidth (value, max) {
   return Math.min(Math.max(Math.round(value), MIN_PANEL_WIDTH), Math.max(MIN_PANEL_WIDTH, max))
@@ -151,6 +175,7 @@ export default {
     }
   },
   computed: {
+    sparklePath: () => SPARKLE_PATH,
     panelOpen: sync('ai/panelOpen'),
     unreadCount: sync('ai/unreadCount'),
     path: get('page/path'),
@@ -686,6 +711,22 @@ $ai-header-border: rgba(255, 255, 255, 0.12);
     border-radius: 14px;
   }
 
+  // One gentle twinkle on the sparkles when the page loads, so the
+  // launcher says what it is without animating for ever. The peak scale
+  // stays inside the gap the mask cuts around them, so they never touch
+  // the bubble's outline. Readers who ask for less motion get none: the
+  // rule only exists inside `no-preference`. It sits on a group nested
+  // inside the one that places the sparkles, because `transform-box`
+  // re-anchors an SVG `transform` attribute as well as the animation's
+  // own, which would drag them off their corner.
+  @media (prefers-reduced-motion: no-preference) {
+    &-spark {
+      transform-box: fill-box;
+      transform-origin: 50% 50%;
+      animation: ai-launcher-spark-twinkle 1.1s ease-in-out 0.5s 1 both;
+    }
+  }
+
   &-badge {
     position: absolute;
     top: -5px;
@@ -716,6 +757,11 @@ $ai-header-border: rgba(255, 255, 255, 0.12);
     right: auto;
     left: -5px;
   }
+}
+
+@keyframes ai-launcher-spark-twinkle {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  35% { transform: scale(1.12); opacity: 0.72; }
 }
 
 // Lift Wiki.js's floating edit button above the launcher
