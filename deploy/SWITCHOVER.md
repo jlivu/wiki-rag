@@ -31,7 +31,9 @@ accounts and the settings are the ones already there.
   when upstream finally tags it.
 - The wiki database's **password is changed** (step 8). Afterwards it
   exists only in `deploy/.env.prod`, never in a compose file.
-- Production gets its **own Anthropic key**, separate from development's.
+- Production uses the **same Anthropic key as development** (decided
+  2026-10-27). It is copied out of `ai/.env` at step 3, never typed.
+  `WIKI_API_KEY` is still made fresh in the production wiki, at step 9.
 - One page comes across from development: **`sops/sqlserver-restore`**
   (step 11). Nothing else does.
 - The old stack's Postgres is already bound to `127.0.0.1` (done
@@ -76,7 +78,9 @@ Note the dated tags it prints; they are what you roll back to.
 ## 3. Write deploy/.env.prod
 
 ```bash
-cp deploy/.env.prod.example deploy/.env.prod
+# Only if it is not there already — ANTHROPIC_API_KEY was put in on
+# 2026-10-27 and cp would quietly write over it.
+cp -n deploy/.env.prod.example deploy/.env.prod
 ```
 
 Fill in, following "Secrets" in `deploy/README.md` so nothing is echoed
@@ -97,23 +101,35 @@ and nothing lands in your shell history:
   printf 'INDEX_DB_PASS=%s\n' "$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32)" >> deploy/.env.prod
   ```
 
-- `ANTHROPIC_API_KEY` — a **separate production key**, not development's,
-  so the two can be told apart on the bill. Make one at
-  console.anthropic.com, name it for this wiki, then:
+- `ANTHROPIC_API_KEY` — **the same key development uses** (decided
+  2026-10-27; it used to be a separate production key, so the two could
+  be told apart on the bill, but one key is one thing to rotate and the
+  runs are already told apart in the service's own log). **Done on
+  2026-10-27** — there is nothing to do here unless the file has been
+  rebuilt since. It is copied straight across, so the value is never
+  displayed, never typed and never in shell history:
 
   ```bash
   sed -i '' '/^ANTHROPIC_API_KEY=/d' deploy/.env.prod
-  read -rs "value?ANTHROPIC_API_KEY (production): " && printf 'ANTHROPIC_API_KEY=%s\n' "$value" >> deploy/.env.prod && unset value
+  grep '^ANTHROPIC_API_KEY=' ai/.env >> deploy/.env.prod
   ```
 
-  Nothing is echoed; the command itself holds no secret, so it is safe in
-  history. Check it arrived without showing it:
+  Check it arrived, without showing it:
 
   ```bash
-  grep -c '^ANTHROPIC_API_KEY=sk-' deploy/.env.prod     # 1
+  grep -c '^ANTHROPIC_API_KEY=sk-ant-' deploy/.env.prod     # 1
+  # and that it is the same line as development's
+  [ "$(grep -m1 '^ANTHROPIC_API_KEY=' ai/.env | shasum)" \
+  = "$(grep -m1 '^ANTHROPIC_API_KEY=' deploy/.env.prod | shasum)" ] && echo same
   ```
 
-- `WIKI_API_KEY` — leave empty for now; it is made in step 9.
+  Because the key is shared, **rotating it means editing both files**.
+  Development's container picks the new value up on its next start;
+  production's does the same.
+
+- `WIKI_API_KEY` — leave empty for now. This one is **not** shared: the
+  production wiki issues its own in step 9, because it is a key *into*
+  that wiki rather than a key out to a service.
 
 Check it parses, without starting anything:
 

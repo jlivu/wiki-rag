@@ -121,6 +121,7 @@ with no values; copy what you need.
 | `LLM_MODEL`         | per provider                       | `claude-sonnet-5-5` for Anthropic, `qwen3.5` for Ollama. |
 | `ANTHROPIC_API_KEY` | —                                  | Required for `anthropic`. Never logged, never sent to the browser. |
 | `OLLAMA_URL`        | `http://host.docker.internal:11434`| Ollama runs natively on the Mac, so containers reach it through the host. |
+| `OLLAMA_RETRIEVE_FIRST` | `false`                        | Ollama only: run the search server-side and let the model answer in one turn. See *Retrieve first*. |
 | `MAX_TOOL_STEPS`    | `6`                                | Rounds of wiki tool calls before the agent has to answer. |
 | `MAX_OUTPUT_TOKENS` | `8192`                             | Ceiling for one reply. Thinking counts towards it on current Claude models. |
 | `LLM_EFFORT`        | `medium`                           | Anthropic only: `low` to `max`. Higher costs more and takes longer. |
@@ -390,6 +391,93 @@ have Ollama's `tools` capability; neither is as good as it looks on paper.
 | **Haiku 5.5**, Extra high | 10.7 s, checklist + table + sources | 6.0 s, known_issue + sources | 12.5 s, draft_page + sources |
 | **gemma4:e4b**, High | 25.5 s, checklist + table + sources | 3.4 s, **nothing at all** | 15.9 s, draft_page |
 | **qwen3.5**, High | **531.8 s**, the same checklist **five times** | 21.6 s, known_issue + sources | 43.8 s, draft_page, no text |
+
+#### Bigger local models, measured 2026-10-28
+
+Four were pulled and benchmarked against `gemma4:e4b` and Sonnet 5.5:
+Gemma 4's 26B mixture-of-experts and 31B dense, Qwen 3.5 27B, and
+GLM-4.7-flash. Ninety single-turn runs (three questions, both of
+Ollama's APIs, three repeats) isolated card drawing from the agent loop;
+forty-eight panel runs then measured the whole job.
+
+| | Right card, 18 runs | Median total | Resident |
+| --- | --- | --- | --- |
+| `gemma4:e4b` | 17/18 | **5.9 s** | 9.5 GB |
+| `gemma4:26b-a4b-it-q4_K_M` | **12/18** | 11–13 s | 18 GB |
+| `glm-4.7-flash:q4_K_M` | **18/18** | 17–19 s | 30 GB |
+| `qwen3.5:27b-q4_K_M` | 18/18 | 68–100 s | 34 GB |
+| `gemma4:31b-it-q4_K_M` | 18/18 | 67–68 s | ~40 GB |
+
+**Nothing was invented in any of the ninety runs.** What the small models
+get wrong is drawing the card, not the facts.
+
+`gemma4:26b-a4b` is the one to avoid: on the checklist question it emits
+`<checklist title="…" steps="[…]">` as *text* instead of calling the
+tool — 0/6, the same on both APIs, byte-identical across repeats. The
+card never renders and the markup lands in the answer. It calls the
+simpler `known_issue` and `draft_page` schemas correctly, so it is the
+nested array it cannot do.
+
+**The two APIs make no difference worth acting on.** Card counts were
+identical on `/api/chat` and `/v1/chat/completions` for four of the five
+models (e4b was 8/9 against 9/9 — one run). The one thing only the
+native API has is `options.num_ctx`, and a Modelfile gets the same
+result on `/v1`, so the service stays on the OpenAI-compatible endpoint.
+
+#### The context window is the memory, on anything this size
+
+Ollama sizes the KV cache for the model's **whole** context unless told
+otherwise, and on a 27B that costs as much again as the weights:
+
+| | Default | Capped at 32,768 |
+| --- | --- | --- |
+| `gemma4:e4b` | 9.5 GB / 131,072 | 9.5 GB |
+| `glm-4.7-flash` | **30 GB** / 202,752 | **20 GB** |
+| `qwen3.5:27b` | **34 GB** / 262,144 | **17 GB** |
+
+Uncapped this drove the Mac to 4.9 GB free and grew swap to 44 GB, and
+the cost is not subtle: `qwen3.5:27b` generated at **3.3 tokens a
+second** where `glm-4.7-flash` managed 27.0 on the same prompt. That is
+the machine paging, not the model. Capping is also slightly *faster*
+(GLM 27.0 → 28.6 generating, 42k → 48k prompt).
+
+**32,768 is the size.** The largest prompt actually measured was 2,957
+tokens; the system prompt and tool schemas are ~1.9k and each page read
+adds ~3k, so the worst case is ~8k with retrieve-first and ~20k around
+the full loop, plus `MAX_OUTPUT_TOKENS`. 16,384 would not cover the loop.
+
+All three ways of capping give **identical** results — 20 GB / 32,768
+and 17 GB / 32,768 every time — and differ only in reach:
+
+| | Scope | |
+| --- | --- | --- |
+| `options.num_ctx` | per request | native API only |
+| Modelfile `PARAMETER num_ctx` | per model | works over `/v1`; what the list uses |
+| `OLLAMA_CONTEXT_LENGTH` | **the whole Mac** | would change the context for every other app using Ollama here, so not used |
+
+#### Retrieve first, for local models
+
+`OLLAMA_RETRIEVE_FIRST=1`. Forty-eight panel runs, four questions
+including a follow-up, on capped models, timed to the first thing the
+reader sees:
+
+| | Right card | Answered | 1st seen | Median | Worst |
+| --- | --- | --- | --- | --- | --- |
+| `gemma4:e4b` — loop | 8/12 | 12/12 | 7.6 s | 18.1 s | 47.7 s |
+| `gemma4:e4b` — retrieve-first | 10/12 | 12/12 | **4.5 s** | **10.9 s** | **25.4 s** |
+| `glm-4.7-flash` — loop | 10/12 | 12/12 | 14.9 s | 64.5 s | **1,430 s** |
+| `glm-4.7-flash` — retrieve-first | 8/12 | 12/12 | **4.9 s** | **21.6 s** | **63.7 s** |
+| Sonnet 5.5 — loop (cloud) | 12/12 | 12/12 | 6.5 s | 7.1 s | 11.2 s |
+
+The loop is where a local model fails, not the cards: GLM scores 18/18
+when handed the context and 8–10/12 when it has to fetch it, and its
+worst run spent **twenty-four minutes** going round. Retrieve-first
+halves the median and cuts the tail by 22×. Card reliability is a wash
+— two runs apart on twelve — and every run produced a real answer.
+
+That is why it is on for local models and off for cloud ones: Sonnet
+answers in 7.1 s with 12/12 and loses nothing by choosing its own
+searches.
 
 Both installed models have Ollama's `tools` capability, so both were
 measured; the answers vary a great deal from one run to the next, and so

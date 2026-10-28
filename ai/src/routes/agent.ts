@@ -145,6 +145,10 @@ export function agentRoutes (config: Config, indexer: Indexer): FastifyPluginAsy
           isAborted: () => aborted,
           signal: abort.signal,
           maxToolSteps: config.llm.maxToolSteps,
+          // Local models only. A cloud model keeps the loop whatever
+          // this setting says: it is a crutch for a small model, not a
+          // change of behaviour for every model.
+          retrieveFirst: provider.id === 'ollama' && config.llm.ollamaRetrieveFirst,
           maxOutputTokens: config.llm.maxOutputTokens,
           effort
         })

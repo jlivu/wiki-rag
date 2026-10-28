@@ -31,6 +31,16 @@ export interface LlmConfig {
    * ai/README.md for what turning it off does to each.
    */
   ollamaThinking: boolean
+  /**
+   * Retrieve first for local models: the server searches and reads, and
+   * the model gets one turn to write the answer and its cards.
+   *
+   * Only ever applied to Ollama. The cloud models are good at deciding
+   * what to look up and lose nothing by being left to it; the small
+   * local ones are the opposite way round. See "Retrieve first" in
+   * ai/README.md for the measurements.
+   */
+  ollamaRetrieveFirst: boolean
   maxToolSteps: number
   maxOutputTokens: number
   effort: Effort
@@ -170,7 +180,11 @@ const MODEL_NOTES: Record<string, string> = {
   // time, for the cards Sonnet already draws one level up. See "Is Opus
   // worth it here" in ai/README.md.
   'claude-opus-5-5': 'Three times Sonnet\u2019s price for the same answers here',
-  'gemma4:e4b': 'Private, slower — and less reliable'
+  'gemma4:e4b': 'Private, slower — and less reliable',
+  // Measured 2026-10-28 against e4b: steadier cards and fuller answers,
+  // for twice the wait and twice the memory. The -ctx32768 in the name
+  // is the point — uncapped it wants 30 GB. See ai/README.md.
+  'glm-4-7-flash-q4_K_M-ctx32768': 'Private, stronger than Gemma — and twice the wait'
 }
 
 /**
@@ -340,6 +354,7 @@ export function loadConfig (env: NodeJS.ProcessEnv = process.env): Config {
       apiKey: env.ANTHROPIC_API_KEY ?? '',
       ollamaUrl: trimSlash(env.OLLAMA_URL ?? 'http://host.docker.internal:11434'),
       ollamaThinking: readBool(env.OLLAMA_THINKING, true),
+      ollamaRetrieveFirst: readBool(env.OLLAMA_RETRIEVE_FIRST, false),
       maxToolSteps: readInt(env.MAX_TOOL_STEPS, 6),
       maxOutputTokens: readInt(env.MAX_OUTPUT_TOKENS, 8192),
       effort: readEffort(env.LLM_EFFORT),
@@ -507,6 +522,7 @@ export function describeConfig (config: Config): Record<string, unknown> {
     maxOutputTokens: config.llm.maxOutputTokens,
     effort: config.llm.effort,
     promptCache: config.llm.cachePrompt,
+    ollamaRetrieveFirst: config.llm.ollamaRetrieveFirst,
     wikiUrl: config.wikiUrl,
     hasApiKey: config.llm.apiKey.length > 0,
     embedModel: config.index.embedModel,

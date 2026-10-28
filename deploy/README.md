@@ -46,6 +46,14 @@ so it is safe in history:
 read -rs "value?ANTHROPIC_API_KEY: " && printf 'ANTHROPIC_API_KEY=%s\n' "$value" >> deploy/.env.prod && unset value
 ```
 
+Better still, when the value already exists somewhere on this machine,
+copy the line rather than handling it at all. `ANTHROPIC_API_KEY` is the
+same key development uses, so it is never typed:
+
+```bash
+grep '^ANTHROPIC_API_KEY=' ai/.env >> deploy/.env.prod
+```
+
 The same for each of `WIKI_DB_PASS`, `INDEX_DB_PASS` and `WIKI_API_KEY`.
 To change one later, delete its line first:
 

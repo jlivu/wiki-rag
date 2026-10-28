@@ -26,7 +26,10 @@ import {
   type PageContext
 } from '../../shared/index.js'
 import type { ChatMessage, ChatProvider, ProviderToolCall, ToolSpec } from '../providers/types.js'
-import { isWikiTool, runWikiTool, wikiToolSpecs, type ToolContext } from '../wiki/tools.js'
+import {
+  GET_DOCUMENT, GET_PAGE, SEARCH_WIKI,
+  isWikiTool, runWikiTool, wikiToolSpecs, type ToolContext
+} from '../wiki/tools.js'
 
 import { CitationRewriter } from './sources.js'
 import { buildSystemPrompt } from './system-prompt.js'
@@ -45,6 +48,17 @@ export interface WikiAgentOptions {
   isAborted: () => boolean
   signal: AbortSignal
   maxToolSteps: number
+  /**
+   * Retrieve first, then answer once.
+   *
+   * The server runs the search and reads the page itself, puts the
+   * results into the conversation as though the model had asked for
+   * them, and gives the model a single turn with only the card tools.
+   * It trades a model that can refine its own search for one that
+   * cannot get lost on the way — see "Retrieve first" in ai/README.md.
+   * Only ever set for a local model.
+   */
+  retrieveFirst?: boolean
   /** How hard the model works, as the reader chose. */
   effort: EffortLevel
   maxOutputTokens: number
@@ -77,10 +91,17 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
     protocolVersion: PROTOCOL_VERSION
   })
 
-  const system = buildSystemPrompt(opts.page, !toolContext.client.isAuthenticated)
+  const system = buildSystemPrompt(
+    opts.page, !toolContext.client.isAuthenticated, opts.retrieveFirst === true
+  )
   const messages = toChatMessages(input.messages)
   const panelTools = panelToolSpecs()
   const allTools = [...wikiToolSpecs(locale), ...panelTools]
+
+  // Retrieve-first does the looking up before the model is asked
+  // anything, so the loop below has one pass and no wiki tools.
+  const retrieveFirst = opts.retrieveFirst === true
+  const maxToolSteps = retrieveFirst ? 0 : opts.maxToolSteps
 
   const pendingToolCallIds: string[] = []
   const rewriter = new CitationRewriter(toolContext.sources)
@@ -119,13 +140,17 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
     }
   }
 
-  for (let step = 0; step <= opts.maxToolSteps; step++) {
+  if (retrieveFirst) {
+    await retrieveForModel(messages, toolContext, locale, input, stats)
+  }
+
+  for (let step = 0; step <= maxToolSteps; step++) {
     if (isAborted()) { return stats }
 
     stats.steps = step + 1
     // The last pass offers no wiki tools, so the model has to answer with
     // what it has rather than searching for ever.
-    const tools = step < opts.maxToolSteps ? allTools : panelTools
+    const tools = step < maxToolSteps ? allTools : panelTools
 
     let text = ''
     const calls: ProviderToolCall[] = []
@@ -298,6 +323,167 @@ export async function runWikiAgent (opts: WikiAgentOptions): Promise<RunStats> {
   })
 
   return stats
+}
+
+/** How many of the search results the server reads before answering. */
+const RETRIEVE_FIRST_READS = 2
+
+/**
+ * Do the looking up on the model's behalf.
+ *
+ * The small local models are good enough at writing an answer from a
+ * page in front of them and much worse at deciding, turn by turn, to
+ * search and then to read: they search twice, or read nothing, or spend
+ * the turn thinking and stop. This runs the two tools the loop almost
+ * always ends up running — search, then read the best results — and
+ * puts them into the conversation as though the model had asked, so it
+ * is left with the one job it can do.
+ *
+ * The tools are the same ones the model would have called, run as the
+ * same reader, so permissions and the source registry behave exactly as
+ * they do in the loop and citations still resolve.
+ *
+ * Two things the loop does for itself have to be done here instead:
+ *
+ *   a follow-up  "what about the log file?" means nothing on its own,
+ *                so a short or back-referring question is searched for
+ *                together with the one before it
+ *   nothing found  the loop would search again in different words, so
+ *                  this falls back to the bare keywords once before
+ *                  letting the model say the wiki does not cover it
+ */
+async function retrieveForModel (
+  messages: ChatMessage[],
+  ctx: ToolContext,
+  locale: string,
+  input: RunAgentInput,
+  stats: RunStats
+): Promise<void> {
+  const question = lastUserText(input)
+  if (question.length === 0) { return }
+
+  const run = async (name: string, args: Record<string, unknown>): Promise<string> => {
+    const startedAt = Date.now()
+    const outcome = await runWikiTool(ctx, name, args)
+    stats.toolCalls.push({
+      name, ms: Date.now() - startedAt, retrievedForModel: true, ...outcome.summary
+    })
+    const call: ProviderToolCall = { id: randomUUID(), name, args }
+    messages.push({ role: 'assistant', content: '', toolCalls: [call] })
+    messages.push(toolResult(call, outcome.result))
+    return outcome.result
+  }
+
+  const resultsOf = (searched: string): Array<{ kind?: unknown, path?: unknown }> => {
+    try {
+      const parsed = JSON.parse(searched) as { results?: unknown }
+      return Array.isArray(parsed.results) ? parsed.results as Array<{ kind?: unknown, path?: unknown }> : []
+    } catch {
+      // A tool that answered with something unparseable has already said
+      // so in its own result; the model sees that and copes.
+      return []
+    }
+  }
+
+  // A follow-up carries its subject in the question before it.
+  const earlier = previousUserText(input)
+  const query = earlier.length > 0 && refersBack(question)
+    ? `${earlier} ${question}`
+    : question
+  stats.toolCalls.push({ name: 'retrieve_first', query, followUp: query !== question })
+
+  let results = resultsOf(await run(SEARCH_WIKI, { query, locale }))
+
+  // Nothing matched. The loop's answer to this is to search again in
+  // other words, so do that once: the bare keywords, without the
+  // question around them.
+  if (results.length === 0) {
+    const broader = keywordsOf(query)
+    if (broader.length > 0 && broader !== query.toLowerCase()) {
+      stats.toolCalls.push({ name: 'retrieve_first_retry', query: broader })
+      results = resultsOf(await run(SEARCH_WIKI, { query: broader, locale }))
+    }
+  }
+
+  for (const result of results.slice(0, RETRIEVE_FIRST_READS)) {
+    const path = typeof result.path === 'string' ? result.path : ''
+    if (path.length === 0) { continue }
+    // A file and a video are read by get_document; only a page is a page.
+    await run(result.kind === 'page' ? GET_PAGE : GET_DOCUMENT,
+      result.kind === 'page' ? { path, locale } : { path })
+  }
+}
+
+/** The question as the reader typed it, which becomes the search query. */
+function lastUserText (input: RunAgentInput): string {
+  return userTexts(input)[0] ?? ''
+}
+
+/** The one before it, which is where a follow-up's subject is. */
+function previousUserText (input: RunAgentInput): string {
+  return userTexts(input)[1] ?? ''
+}
+
+/** The reader's own messages, newest first. */
+function userTexts (input: RunAgentInput): string[] {
+  const out: string[] = []
+  for (let at = input.messages.length - 1; at >= 0; at--) {
+    const message = input.messages[at]
+    if (message?.role === 'user') { out.push(contentToText(message.content).trim()) }
+  }
+  return out
+}
+
+/**
+ * Does this question need the one before it to make sense?
+ *
+ * Two signals, either of which is enough: it is short, or it leans on
+ * something already said. Both are cheap and wrong sometimes — a short
+ * question about a new subject is searched for with the old one
+ * attached — but the search is hybrid, so the new subject's own words
+ * still rank what matches them, and the cost of being wrong is a page
+ * read that the model then does not use.
+ */
+// "that", "this", "these" and "those" are left out on purpose: as
+// determiners they are everywhere in self-contained questions ("this
+// year", "that server"), and the pronoun uses are nearly always in a
+// question short enough for the length test to catch anyway.
+const REFERS_BACK = /\b(it|its|them|they|same|what about|how about|instead|again|also|too)\b/i
+const SHORT_ENOUGH = 8
+
+export function refersBack (question: string): boolean {
+  const words = question.trim().split(/\s+/).filter(word => word.length > 0)
+  return words.length <= SHORT_ENOUGH || REFERS_BACK.test(question)
+}
+
+/**
+ * The question stripped back to the words worth searching for.
+ *
+ * What the tool's own description tells the model to do — "turn the
+ * question into two or three keywords" — done here instead, for the
+ * one retry after a search that found nothing.
+ */
+const STOP_WORDS = new Set([
+  'how', 'do', 'does', 'did', 'i', 'we', 'you', 'my', 'our', 'your', 'me', 'us',
+  'what', 'which', 'who', 'whom', 'whose', 'when', 'where', 'why',
+  'is', 'are', 'was', 'were', 'be', 'been', 'being', 'am',
+  'the', 'a', 'an', 'and', 'or', 'but', 'if', 'then', 'than', 'that', 'this', 'these', 'those',
+  'to', 'in', 'on', 'for', 'of', 'at', 'by', 'with', 'from', 'into', 'about', 'as',
+  'can', 'could', 'should', 'would', 'will', 'shall', 'may', 'might', 'must',
+  'have', 'has', 'had', 'get', 'got', 'make', 'made', 'use', 'used', 'using',
+  'it', 'its', 'they', 'them', 'there', 'here', 'not', 'no', 'yes', 'any', 'some',
+  'mean', 'means', 'up', 'out', 'off', 'over', 'under', 'again', 'also', 'too', 'same'
+])
+const MAX_KEYWORDS = 5
+
+export function keywordsOf (question: string): string {
+  const seen = new Set<string>()
+  const words = question
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, ' ')
+    .split(/\s+/)
+    .filter(word => word.length > 2 && !STOP_WORDS.has(word) && !seen.has(word) && seen.add(word))
+  return words.slice(0, MAX_KEYWORDS).join(' ')
 }
 
 function emitComponent (

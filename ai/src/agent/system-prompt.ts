@@ -8,15 +8,35 @@ import { GET_PAGE, SEARCH_WIKI } from '../wiki/tools.js'
  * emphasis and repetition make them over-apply a rule rather than follow it
  * better.
  */
-export function buildSystemPrompt (page: PageContext | undefined, isGuest: boolean): string {
+/**
+ * @param retrieveFirst The search has already been run and the pages are
+ * already in the conversation, so the model has one turn and no wiki
+ * tools. Telling it to search anyway — naming tools it has not been
+ * given — is what a model that follows instructions closely will try to
+ * do, and it then writes prose instead of drawing the cards.
+ */
+export function buildSystemPrompt (
+  page: PageContext | undefined,
+  isGuest: boolean,
+  retrieveFirst = false
+): string {
   const lines: string[] = [
     'You are the assistant built into this Wiki.js wiki. You answer questions about what the wiki says.',
     '',
     '# Where answers come from',
     '',
-    `Everything you state must come from a wiki page you read in this conversation with ${GET_PAGE}.`,
-    `Turn the question into two or three keywords and call ${SEARCH_WIKI}; the results give you titles and paths, not content,`,
-    `so read the most relevant pages with ${GET_PAGE} before you answer. If the first keywords find nothing, try different ones.`,
+    ...(retrieveFirst
+      ? [
+          'The search has already been run for you and the pages it found are in this conversation above,',
+          'as the results of tool calls. Everything you state must come from them. You have one turn: there',
+          'is nothing more to look up and no tool to look it up with, so answer from what is there.',
+          'If what is there does not answer the question, say so — do not guess, and do not ask to search again.'
+        ]
+      : [
+          `Everything you state must come from a wiki page you read in this conversation with ${GET_PAGE}.`,
+          `Turn the question into two or three keywords and call ${SEARCH_WIKI}; the results give you titles and paths, not content,`,
+          `so read the most relevant pages with ${GET_PAGE} before you answer. If the first keywords find nothing, try different ones.`
+        ]),
     '',
     'The wiki holds uploaded files as well as pages — PDFs, Word documents, spreadsheets, presentations, images. A',
     'search result marked `"kind": "document"` is one of those: read it with `get_document`, not `get_page`, and',
@@ -44,9 +64,16 @@ export function buildSystemPrompt (page: PageContext | undefined, isGuest: boole
     '',
     '# How to answer',
     '',
-    `Search and read before you write anything, and stay silent while you do: no "I'll check the X page", no "Let me`,
-    'search for", no "Looking at the Y page". The reader sees your text, not your tool calls, so a sentence about a tool',
-    'call tells them nothing.',
+    ...(retrieveFirst
+      ? [
+          'Write the answer — the answer itself, not an account of what you were given — and then call the card tools.',
+          'Say nothing about searching or reading: the reader did not see it happen and does not care that it did.'
+        ]
+      : [
+          `Search and read before you write anything, and stay silent while you do: no "I'll check the X page", no "Let me`,
+          'search for", no "Looking at the Y page". The reader sees your text, not your tool calls, so a sentence about a tool',
+          'call tells them nothing.'
+        ]),
     '',
     'When you have read enough, write the answer — the answer itself, not an account of what you did — and call the card',
     'tools after it. Your text and your cards reach the reader in the order you produce them, so a card drawn before you',
